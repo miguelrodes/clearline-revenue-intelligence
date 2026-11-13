@@ -32,6 +32,10 @@ def opportunities(store, workflow="recovery"):
         decisions = store.rows("SELECT e.details,e.created_at,j.payload FROM events e LEFT JOIN jobs j ON j.id=e.job_id WHERE e.opportunity_id=? AND e.kind='agent_decision' ORDER BY e.id DESC LIMIT 1", (row["id"],))
         decision = json.loads(decisions[0]["details"]) if decisions else None
         if decision and decision.get('evidence_hash',json.loads(decisions[0]['payload'] or '{}').get('evidence_hash'))!=row['evidence_hash']: decision=None
+        from .evidence import current_assessment
+        if decision and row['workflow']=='recovery':
+            with store.connect() as con:
+                if not current_assessment(con,row['id'],decision):decision=None
         row.update(engine_version=decision.get('engine_version') if decision else None, recommended_action=decision.get('recommended_action') if decision else None,prior_cents=prior, current_cents=current,
                    change_cents=current-prior, decline_pct=(prior-current)/prior*100 if prior > 0 else None,
                    prior_tests=e.get("prior_tests", 0), current_tests=e.get("current_tests", 0),
@@ -98,6 +102,8 @@ def valid_draft(store, draft):
     opp=store.opportunity(draft['opportunity_id']);a=json.loads(draft['analysis']) if isinstance(draft['analysis'],str) else draft['analysis']
     with store.connect() as con:
         restriction=policy(con,opp['id'])
+        from .commercial import execution_issues
+        if opp['workflow']=='recovery' and execution_issues(con,opp['id'],a):return False
         stale=bool(a.get('engine_version')) and a.get('context_hash')!=context_hash(con,opp['id'])
     return bool(not stale and permitted(opp,a,restriction,draft) and opp['active'] and opp['status'] not in STOPPED_STATUSES and opp['evidence_hash']==draft['evidence_hash'])
 

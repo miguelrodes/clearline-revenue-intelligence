@@ -73,22 +73,25 @@ def current_draft(store,job):
 
 async def rewrite(store,job,settings):
     from .agent import reviewed_run,INSTRUCTIONS
+    from .commercial_agent import COMM_REVIEW
     d=current_draft(store,job)
     if not d:return None
     instructions=INSTRUCTIONS+"""
 Your task is to REVISE the existing email using only human_guidance as instructions. Preserve customer, approved action scope
-and commercial purpose unless the guidance requests a safe change. Output RevisedProposal (subject/body/review_note).
+and commercial purpose; strategy changes require reassessment. Output RevisedProposal (subject/body/review_note).
 Retrieve overview, purchasing, relationships and catalogue; consider prior messages. A request for a discount is not authority
 to invent terms, price, eligibility or expiry. Explain guidance you cannot safely satisfy in review_note. No sends/approvals.
 """
     original=json.loads(d['analysis'])
+    instructions+='\nExecute only this independently reviewed commercial plan; changes to objective/recipient/intervention require reassessment, not rewriting: '+json.dumps(original.get('commercial_plan'))
     review_only=job['payload'].get('review_only',False)
     if review_only:
         instructions+='\nThis is a QUALITY CHECK of a human edit. Return its subject and body EXACTLY, without rewriting any word. Evaluate against the retrieved evidence and existing action scope. Unsupported edits must fail review; do not repair or invent evidence to pass. Explain the result in review_note.'
     value=await reviewed_run(store,job,settings,RevisedProposal,instructions,json.dumps({'human_guidance':job['payload']['instructions'],
         'saved_draft':{'subject':d['subject'],'body':d['body'],'analysis':original}}),
         validator=(lambda value:require_exact_edit(value,d)) if review_only else None,
-        proposal_defaults={'decision':'pursue','action_scope':original.get('action_scope','none')})
+        proposal_defaults={'decision':'pursue','action_scope':original.get('action_scope','none'),'commercial_plan':original.get('commercial_plan')},
+        review_instructions=COMM_REVIEW)
     return RevisedEmail.model_validate(value)
 
 
@@ -104,6 +107,7 @@ def save_revision(store,job,result):
         if job['payload'].get('review_only'):
             require_exact_edit(result.model_dump(),d)
             if not result.engine_version or not (result.quality or {}).get('passed'):raise ValueError('The edited message requires a successful quality review')
+        if not result.engine_version or not (result.quality or {}).get('passed'):raise ValueError('The revised message requires a successful quality review')
         analysis=json.loads(d['analysis']);analysis['revision_note']=result.review_note
         if result.engine_version:
             from .action_policy import proposal_fingerprint,permitted

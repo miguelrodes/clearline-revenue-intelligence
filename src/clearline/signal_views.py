@@ -10,7 +10,7 @@ KEYS=('inactivity','partial','product_decline','direct_gap_channel_review')
 def disposition(a):
     if not a['assessment']:return 'unassessed'
     if a['status']=='awaiting_approval':return 'human_decision'
-    if a['status'] in ('agent_held','needs_contact'):return 'verification'
+    if a['status'] in ('agent_held','needs_contact','human_verification','internal_investigation'):return 'verification'
     if a['assessment'] in ('no_action','reject') or a['status'] in ('no_action','rejected','opted_out','closed','lost','deferred'):return 'no_action'
     return 'actionable'
 
@@ -71,8 +71,29 @@ def signal_detail(store,key):
     brief=current_brief(store)['brief'];ai=next((s['advice'] for s in (brief or {}).get('signal_advice',[]) if s['key']==key),None)
     amount=f"${segment['decline_cents']/100:,.0f}"
     noun='qualifying product-level revenue reduction' if key=='product_decline' else 'historical purchasing decline'
+    signal_ids={a['id'] for a in rows}
+    signal_amounts={a['id']:a['decline_cents'] for a in actions}
+    message_explanations={
+        'support':'The saved review flagged a training or product-support need. The prepared message asks what help the customer needs before discussing additional products.',
+        'order_status':'Open-order records may explain the purchasing gap. The prepared note checks order status before any reorder discussion.',
+        'channel_support':'These customers may buy through an existing distributor. The prepared note offers support without assuming the customer should change that route.',
+        'channel_review':'The current buying route needs clarification. The prepared note asks how to support the account before recommending a direct reorder.',
+    }
+    recommendations=[]
+    for g in groups:
+        member_ids={m['id'] for m in g['members'] if m.get('id')} & signal_ids
+        if not member_ids:continue
+        # Use only this signal's matched account values (SKU views use their
+        # qualifying product declines), never the full work-group total.
+        financial=sum(max(0,signal_amounts.get(i,0)) for i in member_ids)
+        group_key=g['id'].removeprefix('messages:')
+        why=message_explanations.get(group_key,g['why'])
+        recommendations.append({'id':g['id'],'title':g['title'],'kind':g['kind'],'accounts':len(member_ids),
+                                 'why':why,'button_label':g['button_label'],'rank':g['rank'],'status':g['status'],
+                                 'financial_cents':financial,
+                                 'financial_label':'Qualifying product decline associated with these accounts' if key=='product_decline' else 'Historical purchasing decline associated with these accounts',
+                                 'href':'/actions?'+urlencode({'group':g['id'],'signal':key})})
     return {'key':key,'segment':segment,'fact_summary':f"{segment['accounts']} account records show this signal, associated with {amount} in {noun} across January–October 2025 and 2026.",
             'ai_advice':ai,'chart':list(products.values()) if key=='product_decline' else sorted(chart,key=lambda x:-x['decline_cents']),
-            'actions':actions,'groups':[{'id':g['id'],'title':g['title'],'kind':g['kind'],'accounts':sum(m['id'] in {a['id'] for a in rows} for m in g['members']),
-                                      'href':'/actions?'+urlencode({'group':g['id'],'signal':key})} for g in groups if any(m['id'] in {a['id'] for a in rows} for m in g['members'])],
+            'actions':actions,'groups':recommendations,
             'limits':'These categories overlap. Historical declines are not forecast recovery. Causes remain hypotheses until confirmed with the customer or source records.'}

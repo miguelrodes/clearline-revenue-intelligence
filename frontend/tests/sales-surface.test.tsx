@@ -47,9 +47,9 @@ it('disables batch approval when selected messages have unsaved edits',async()=>
 });
 it('separates simulated outcomes from verified revenue and incremental claims',async()=>{
  render(<RecoveryPerformance/>);
- expect(await screen.findByText(/No verified commercial results yet/)).toBeInTheDocument();
+ expect(await screen.findByText(/No verified results have been recorded/)).toBeInTheDocument();
  expect(screen.queryByText('18')).not.toBeInTheDocument();
- fireEvent.click(screen.getByRole('button',{name:'Simulated results'}));expect(screen.getByText('18')).toBeInTheDocument();
+ fireEvent.change(screen.getByRole('combobox',{name:'Revenue recovery results'}),{target:{value:'simulation'}});expect(screen.getByText('18')).toBeInTheDocument();
  fireEvent.click(screen.getByRole('button',{name:'How it is measured'}));expect(screen.getByText('Estimated incremental recovery: unavailable.')).toBeInTheDocument();
 });
 it('keeps prepared work readable with product and status grouping',async()=>{

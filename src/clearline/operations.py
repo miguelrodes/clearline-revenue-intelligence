@@ -48,6 +48,8 @@ def start_batch(store, ids=None, request_id=None):
                 from .evidence import current_assessment
                 cached=current_assessment(con,oid,a)
             from .evidence import context_hash,ENGINE_VERSION
+            if previous and a.get('reassess_at') and a['reassess_at']<=utcnow():
+                con.execute("INSERT INTO controls VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",('reassessment:'+oid,a['reassess_at']))
             revision=context_hash(con,oid)
             jid=None if cached else store._enqueue(con,'analyze',{'evidence_hash':o['evidence_hash'],'context_hash':revision,'engine_version':ENGINE_VERSION,'followup_of':None,'portfolio':True,'allow_simulation':False},oid,f"analyze:{oid}:{revision}:{ENGINE_VERSION}:initial")
             con.execute('INSERT INTO batch_accounts VALUES(?,?,?,?)',(bid,oid,jid,'cached' if cached else 'queued'))

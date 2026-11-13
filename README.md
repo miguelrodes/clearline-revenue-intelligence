@@ -237,6 +237,11 @@ AI briefing contract, direct action destinations, 15-way live benchmark and veri
 
 ## Repeatable Phase 1 demo
 
+The current commercial-5.3 baseline requires verified recipient/relationship evidence before
+outreach. The old conversation guides describe historical drafts; use the commercial
+pipeline and current acceptance report below for the new execution rules. A separate,
+explicitly synthetic fixture verifies sending and replies without authorizing source accounts.
+
 The prepared, isolated demo is ready. See [demo readiness and exact reset steps](docs/demo-readiness.md). Run `.venv/bin/python scripts/reset_demo.py`, then `.venv/bin/python -m clearline.demo serve`; refresh the existing frontend at http://127.0.0.1:3000/. The original database remains separate.
 
 The [customer conversation guide](docs/customer-conversation-demo.md) walks through Lone Tree’s original outreach, a fictional inbound reply, genuine AI interpretation, fresh approval and reset. The account page includes the simulator control; Gmail/Outlook integration remains deferred.
@@ -244,3 +249,79 @@ The [customer conversation guide](docs/customer-conversation-demo.md) walks thro
 ## MCP alternative interface (Phase 1)
 
 The same backend is available at `http://127.0.0.1:8000/mcp` with required authentication and exact-version human approvals. Start the existing demo services, validate with MCP Inspector, then use the authenticated local chatbot. See [setup, authentication and limitations](docs/mcp-integration.md) and [dashboard feature parity](docs/mcp-feature-parity.md). ChatGPT OAuth/Secure MCP Tunnel and ngrok credentials still require account setup; never expose the unauthenticated local dashboard API.
+
+
+## Commercial decision pipeline (Phases 1 and 2)
+
+The recovery pipeline now separates deterministic detection, tool-based investigation,
+commercial strategy, independent decision review, communication preparation and human
+approval. A decision to investigate or pursue an opportunity no longer requires an email.
+Supported dispositions are contact, internal investigation, human verification, monitoring,
+deferral and no action. All source CSVs remain read-only.
+
+Nine categories have persistent `commercial_signals` records: inactivity, purchasing decline,
+SKU decline, missed replenishment, distributor-owned purchasing decline, aged open orders,
+evidence-backed cross-selling, purchasing obstacles and churn-risk investigation. Multiple
+signals describe overlapping evidence; their dollar values must not be added together.
+Records retain trigger evidence, amount, assessment status, disposition and next step.
+
+A contact strategy requires a human-recorded recipient/relationship authorization, successful
+commercial review, no unresolved blocking prerequisites, a successful communication review
+and exact-version human approval. The simulation address grants no commercial permission.
+Dashboard, batch and MCP paths enforce the same rules. Earlier drafts and decisions remain
+in history but cannot reuse an outdated review. No real email transport has been added.
+
+On an account, record a verified investigation finding or relationship authorization to queue
+reassessment. New source evidence and customer responses also invalidate cached decisions.
+Timed reviews get a new context key once due; unchanged assessments are reused. The CSV
+business clock remains November 1, 2026; simulated conversations and scheduling use the
+live clock. Changing the business cutoff requires a deliberate scan configuration change.
+
+### Detection policy and evidence limits
+
+- Inactivity retains the existing rule: at least three direct purchase dates, a gap above 90
+  days and above 1.5 times median identified purchasing cadence.
+- Account and product deterioration retain the existing strict greater-than-25% threshold
+  with at least $1,000 prior comparable-period revenue; product triggers use physical tests.
+- Replenishment requires at least four distinct invoice dates, gap variability (coefficient
+  of variation) at most 0.5, and elapsed time above 1.5 times the median interval. Recent
+  open orders remain explicit counterevidence; a signal is not an instruction to reorder.
+- Distributor decline concerns its own bill-to purchases: prior value at least $1,000 and
+  a decline greater than 25%. A distributor's buyer is distinct from downstream institutions.
+- Open orders aged at least 30 days trigger internal review. This configurable threshold
+  is not an invented shipment SLA. Order and credit-led contact require resolutions tied
+  to the relevant source lines.
+- Product associations use resolved institutional baskets, at least 30 accounts and 10
+  paired customers, confidence >=60%, lift >=1.2 and a Wilson lower bound above the
+  baseline product frequency. These observational associations are hypotheses, not demand.
+- CRM training, contact, funding and product concerns create candidates, not verified
+  current needs. Credits and complaints require explanation before implying dissatisfaction.
+  Simulated customer requests have separate cited message signals; negation and resolution
+  require investigation. Missing source evidence cannot establish contract renewals or SLAs.
+- Only `_cents` fields are cents. Raw CSV prices, line totals and catalogue prices are dollars.
+
+### Reproducible validation
+
+`python -m pytest -q` runs deterministic detection and all existing workflow boundary tests.
+`npm test --prefix frontend` runs UI tests. `npm run build --prefix frontend -- --webpack`
+provides a production build where the local sandbox prevents Turbopack's helper port.
+
+`python scripts/evaluate_commercial_judgment.py --review --env-file /absolute/path/.env`
+runs 40 balanced, explicitly synthetic cases. Expected outcomes are fixed before execution;
+positive and negative cases are repeated to test consistency. Source fixtures, every failure,
+outputs, independent adjudication and API usage remain under ignored `runtime/judgment-53/`.
+The independent evaluator receives evidence and the chosen strategy, without the original
+supervisor verdict or expected answer. This is a bounded behavioral evaluation, not proof of
+real-world conversion performance.
+
+`python scripts/commercial_evaluate.py --all --db runtime/portfolio-evaluation.sqlite3
+--baseline runtime/preserved-baseline.sqlite3 --env-file /absolute/path/.env --concurrency 24
+--budget 120` evaluates a **separate** preserved portfolio copy. Run the command on one line.
+It never sends messages. Cached current decisions are reused, incomplete coverage is explicit,
+and billing/budget stops leave recoverable jobs. In-flight calls may finish after the budget
+threshold. Do not replace the live database with this copy: use the guarded promotion script
+so subsequent human changes and prior approvals/sends remain intact.
+
+`verify_commercial_conversation.py` accepts only a labeled synthetic evaluation identity and
+checks the real-model reply, explicit test-input approvals, simulated delivery deduplication
+and restoration of a disposable baseline. It must never approve actual portfolio messages.

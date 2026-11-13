@@ -1,3 +1,4 @@
+from commercial_fixtures import save_reviewed_fixture
 import json
 from uuid import uuid4
 import pytest
@@ -82,6 +83,9 @@ def test_bulk_atomic_rollback(settings,store,draft):
     with store.connect(write=True) as c:
         c.execute("INSERT INTO opportunities SELECT 'second','second',name,state,decline_cents,evidence,evidence_hash,holds,status,active,updated_at,workflow FROM opportunities WHERE id='example'")
         c.execute("INSERT INTO drafts SELECT 'second-draft','second',version,evidence_hash,recipient,subject,body,status,analysis,created_at FROM drafts WHERE id=?",(draft['id'],))
+    from test_commercial import certified
+    a=certified(store,'second',json.loads(draft['analysis']))
+    with store.connect(write=True) as c:c.execute("UPDATE drafts SET analysis=? WHERE id='second-draft'",(json.dumps(a),))
     r=s.review_outreach([draft['id'],'second-draft'])
     with store.connect(write=True) as c:c.execute("UPDATE opportunities SET holds='[\"open_orders\"]' WHERE id='second'")
     with pytest.raises(ValueError):s.decide_review(r['review_id'],True,r['required_confirmation'])
@@ -101,7 +105,7 @@ def test_regeneration_respects_racing_edit(settings,store,draft,decision):
     job=store.claim(['analyze'])
     assert job['id']==r['job_id']
     store.revise_draft(draft['id'],draft['recipient'],'New subject',draft['body'])
-    store.save_analysis(job,decision)
+    save_reviewed_fixture(store,job,decision)
     assert store.rows('SELECT status FROM jobs WHERE id=?',(job['id'],))[0]['status']=='cancelled'
     assert len(store.rows('SELECT * FROM drafts'))==2
 
@@ -114,7 +118,7 @@ def test_real_transport_reply_persistence(client,store,draft,reply_decision):
     args={'account_id':'example','message':{'reply_to':parent,'message_id':'test-mcp-reply','body':'We need training.'}}
     result=data(call(client,'simulate_customer_reply',args))
     again=data(call(client,'simulate_customer_reply',args));assert again['job_id']==result['job_id']
-    j=store.claim(['reply']);store.save_analysis(j,reply_decision)
+    j=store.claim(['reply']);save_reviewed_fixture(store,j,reply_decision)
     thread=data(call(client,'get_conversation',{'account_id':'example'}))
     assert len(thread['messages'])==2
     assert store.rows('SELECT * FROM reply_interpretations')
@@ -155,10 +159,10 @@ def test_reply_regeneration_and_fresh_approval(settings,store,draft,reply_decisi
     j=store.claim(['deliver']);store.deliver(j);store.finish(j['id'])
     parent=s.conversation('example')['messages'][0]['id']
     SimulatedProvider(store).ingest('example',parent,'first','We need training.')
-    j=store.claim(['reply']);store.save_analysis(j,reply_decision)
+    j=store.claim(['reply']);save_reviewed_fixture(store,j,reply_decision)
     old=store.rows("SELECT * FROM drafts WHERE status='awaiting_approval'")[0]
     r=s.regenerate_draft(old['id'],old['version'],uuid4());j=store.claim(['reply']);assert j['id']==r['job_id']
-    store.save_analysis(j,{**reply_decision,'body':'Which team would benefit from training?'})
+    save_reviewed_fixture(store,j,{**reply_decision,'body':'Which team would benefit from training?'})
     ds=store.rows("SELECT * FROM drafts WHERE status='awaiting_approval'")
     assert len(ds)==1 and ds[0]['version']==old['version']+1
     assert len(store.rows('SELECT * FROM approvals'))==1

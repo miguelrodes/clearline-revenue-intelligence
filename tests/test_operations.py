@@ -1,3 +1,4 @@
+from commercial_fixtures import save_reviewed_fixture,reviewed_fixture
 import asyncio
 import copy
 import json
@@ -25,7 +26,7 @@ def test_six_parallel_and_same_account_serialized(store,settings,opportunity,dec
         active+=1;peak=max(peak,active);await asyncio.sleep(.05);active-=1
         from clearline.evidence import ENGINE_VERSION,context_hash
         with store.connect() as con:revision=context_hash(con,args[1]['opportunity_id'])
-        return {**decision,'engine_version':ENGINE_VERSION,'context_hash':revision}
+        return reviewed_fixture(store,args[1],decision)
     asyncio.run(run_pool(store,settings,analyst,drain=True,auto_brief=False))
     assert peak==6
     assert len(store.rows("SELECT * FROM events WHERE kind='agent_decision'"))==12
@@ -39,7 +40,9 @@ def test_six_parallel_and_same_account_serialized(store,settings,opportunity,dec
 
 def test_held_can_be_investigated_but_never_drafted(store,opportunity,decision):
     opportunity['holds']=['open_orders_require_review'];opportunity['evidence']['holds']=opportunity['holds'];opportunity['evidence_hash']=digest(opportunity['evidence']);store.save_scan({},[opportunity])
-    start_batch(store);job=store.claim();store.save_analysis(job,decision)
+    start_batch(store);job=store.claim()
+    with pytest.raises(ValueError,match='execution boundaries'):save_reviewed_fixture(store,job,decision)
+    save_reviewed_fixture(store,job,{**decision,'decision':'hold','subject':'','body':''})
     assert not store.rows('SELECT * FROM drafts')
     assert store.opportunity('example')['status']=='agent_held'
     assert json.loads(store.rows("SELECT details FROM events WHERE kind='agent_decision'")[0]['details'])['decision']=='hold'
@@ -47,7 +50,7 @@ def test_held_can_be_investigated_but_never_drafted(store,opportunity,decision):
 
 def test_campaign_15_atomic_approval_and_no_duplicate_send(store,settings,opportunity,decision):
     ids=population(store,opportunity);cid=create_campaign(store,'Fifteen',ids,True)
-    async def analyst(*args):return decision
+    async def analyst(*args):return reviewed_fixture(store,args[1],decision)
     asyncio.run(run_pool(store,settings,analyst,drain=True,auto_brief=False))
     view=campaign_view(store,cid);assert view['ready']==15
     snapshots=[{'draft_id':m['draft']['id'],'snapshot_hash':m['draft']['snapshot_hash']} for m in view['members']]
@@ -88,14 +91,14 @@ def test_rate_limit_backoff_and_quota_block(store,settings,opportunity):
 
 
 def test_cancellation_and_restart_cannot_duplicate_campaign_drafts(store,settings,opportunity,decision):
-    cid=create_campaign(store,'Cancel',['example'],True);job=store.claim();store.cancel_job(job['id']);store.save_analysis(job,decision)
+    cid=create_campaign(store,'Cancel',['example'],True);job=store.claim();store.cancel_job(job['id']);save_reviewed_fixture(store,job,decision)
     assert not store.rows('SELECT * FROM drafts')
     restarted=Store(settings.db_path);restarted.recover_interrupted()
     assert not restarted.claim()
 
 
 def test_different_version_invalidates_campaign_review(store,settings,opportunity,decision):
-    cid=create_campaign(store,'Edit',['example'],True);job=store.claim();store.save_analysis(job,decision)
+    cid=create_campaign(store,'Edit',['example'],True);job=store.claim();save_reviewed_fixture(store,job,decision)
     d=campaign_view(store,cid)['members'][0]['draft'];snap=[{'draft_id':d['id'],'snapshot_hash':d['snapshot_hash']}]
     store.revise_draft(d['id'],d['recipient'],'Edited subject',d['body'])
     with pytest.raises(ValueError):decide_campaign(store,cid,snap,True)
@@ -112,18 +115,18 @@ def test_low_headroom_does_not_raise_concurrency(settings):
 
 def test_campaign_waits_for_all_preparation_and_requires_all_reviewed_versions(store,settings,opportunity,decision):
     ids=population(store,opportunity,2);cid=create_campaign(store,'Both',ids,True)
-    first=store.claim();store.save_analysis(first,decision)
+    first=store.claim();save_reviewed_fixture(store,first,decision)
     view=campaign_view(store,cid)
     snapshots=[{'draft_id':m['draft']['id'],'snapshot_hash':m['draft']['snapshot_hash']} for m in view['members'] if m['ready']]
     with pytest.raises(ValueError,match='still running'):decide_campaign(store,cid,snapshots,True)
-    store.save_analysis(store.claim(),decision)
+    save_reviewed_fixture(store,store.claim(),decision)
     with pytest.raises(ValueError,match='Campaign changed'):decide_campaign(store,cid,snapshots,True)
     assert not store.rows('SELECT * FROM approvals')
 
 
 def test_repeated_completion_does_not_cancel_job_or_duplicate_draft(store,opportunity,decision):
     create_campaign(store,'Once',['example'],True);job=store.claim()
-    store.save_analysis(job,decision);store.save_analysis(job,decision)
+    save_reviewed_fixture(store,job,decision);save_reviewed_fixture(store,job,decision)
     assert store.rows('SELECT status FROM jobs')[0]['status']=='completed'
     assert len(store.rows('SELECT * FROM drafts'))==1
     assert len(store.rows("SELECT * FROM events WHERE kind='agent_decision'"))==1
@@ -133,7 +136,7 @@ def test_defer_stops_outreach_but_does_not_claim_evidence_resolved(store,opportu
     from clearline.operations import review_recommendation
     cid=create_campaign(store,'Deferred',['example'],True);job=store.claim()
     review_recommendation(store,'example','defer','Waiting for purchasing team identity confirmation')
-    store.save_analysis(job,decision)
+    save_reviewed_fixture(store,job,decision)
     assert store.opportunity('example')['status']=='deferred'
     assert not store.rows('SELECT * FROM drafts')
     assert campaign_view(store,cid)['ready']==0
@@ -142,7 +145,7 @@ def test_defer_stops_outreach_but_does_not_claim_evidence_resolved(store,opportu
 
 def test_stale_assessment_is_not_current_and_failed_batch_members_are_visible(store,opportunity,decision):
     from clearline.reporting import opportunities
-    start_batch(store);job=store.claim();store.save_analysis(job,decision)
+    start_batch(store);job=store.claim();save_reviewed_fixture(store,job,decision)
     opportunity['evidence_hash']='changed';store.save_scan({},[opportunity])
     assert opportunities(store)[0]['assessment'] is None
     start_batch(store);job=store.claim();store.finish(job['id'],'failed','Explicit failure')
@@ -173,14 +176,14 @@ def test_portfolio_scan_keeps_crm_only_unresolved_and_stable_customers_without_d
 
 def test_no_action_assessment_is_persisted_without_outreach(store,opportunity,decision):
     start_batch(store);job=store.claim()
-    store.save_analysis(job,{**decision,'decision':'no_action','subject':'','body':''})
+    save_reviewed_fixture(store,job,{**decision,'decision':'no_action','subject':'','body':''})
     assert store.opportunity('example')['status']=='no_action'
     assert not store.rows('SELECT * FROM drafts')
     assert batches(store)[0]['counts']=={'completed':1}
 
 
 def test_bulk_rejection_prevents_pending_followup_and_any_delivery(store,opportunity,decision):
-    cid=create_campaign(store,'Reject',['example'],True);store.save_analysis(store.claim(),decision)
+    cid=create_campaign(store,'Reject',['example'],True);save_reviewed_fixture(store,store.claim(),decision)
     c=campaign_view(store,cid);d=c['members'][0]['draft']
     assert c['status']=='awaiting_approval'
     store.enqueue('followup',{},'example','future',due='2099-01-01')
@@ -211,7 +214,7 @@ def test_credit_exhaustion_stops_model_queue_but_not_local_work(store,settings,o
     assert len(store.rows("SELECT 1 FROM jobs WHERE kind='analyze' AND status='queued'"))==1
     store.retry(calls[0])
     assert not metrics(store)['api_blocked']
-    async def funded(*args):return decision
+    async def funded(*args):return reviewed_fixture(store,args[1],decision)
     asyncio.run(run_pool(store,settings,funded,drain=True,auto_brief=False))
     assert len(store.rows("SELECT 1 FROM jobs WHERE kind='analyze' AND status='completed'"))==2
 
@@ -220,3 +223,22 @@ def test_drain_exits_when_paused_without_consuming_queue(store,settings,opportun
     start_batch(store);store.set_paused(True)
     asyncio.run(asyncio.wait_for(run_pool(store,settings,drain=True,auto_brief=False),timeout=2))
     assert store.rows("SELECT status FROM jobs WHERE kind='analyze'")[0]['status']=='queued'
+
+
+def test_isolated_provider_failure_retries_without_misclassifying_rate_limit(store,settings,opportunity):
+    class Gateway(Exception):status_code=520;code=None
+    async def fail(*args):raise Gateway()
+    store.queue_analysis('example');job=store.claim();cap=Capacity(replace(settings,concurrency=12,max_concurrency=24))
+    asyncio.run(execute_job(store,settings,job,fail,cap))
+    assert cap.current==12
+    row=store.rows('SELECT status,attempts,error FROM jobs WHERE id=?',(job['id'],))[0]
+    assert row['status']=='queued' and row['attempts']==1 and '520' in row['error']
+    assert not store.rows("SELECT * FROM controls WHERE name='api_blocked'")
+
+
+def test_clustered_provider_failures_reduce_concurrency(settings):
+    cap=Capacity(replace(settings,concurrency=12,max_concurrency=24))
+    cap.transient_failure(5);cap.transient_failure(5)
+    assert cap.current==12
+    cap.transient_failure(5)
+    assert cap.current==6 and cap.cooldown>0

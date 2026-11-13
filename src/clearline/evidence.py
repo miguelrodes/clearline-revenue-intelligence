@@ -4,7 +4,7 @@ from functools import lru_cache
 from hashlib import sha256
 from .data import digest,canonical,cents
 
-ENGINE_VERSION='recovery-4'
+ENGINE_VERSION='commercial-5.3'
 SCHEMA='''CREATE TABLE IF NOT EXISTS investigation_tasks(
  id TEXT PRIMARY KEY, opportunity_id TEXT NOT NULL, context_hash TEXT NOT NULL,
  title TEXT NOT NULL, owner TEXT NOT NULL, reason TEXT NOT NULL, evidence_refs TEXT NOT NULL,
@@ -21,9 +21,15 @@ def context_hash(con,oid):
         material['execution_policy_revision']='missing-state-neutral-support-v1'
     for table,fields in [('messages','id,direction,subject,body,reply_to'),('outcomes','id,kind,note,amount_cents,reference'),('customer_context','contact,channel,outreach_policy')]:
         material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
+    for table,fields in [('contact_authorizations','recipient,role,route,evidence,authorized,updated_at'),('investigation_resolutions','task_id,resolution,updated_at')]:
+        material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
+    epoch=con.execute('SELECT value FROM controls WHERE name=?',('reassessment:'+oid,)).fetchone()
+    material['reassessment_epoch']=epoch['value'] if epoch else None
     return digest(material)
 
 def current_assessment(con,oid,assessment):
+    from .store import utcnow
+    if assessment and assessment.get('reassess_at') and assessment['reassess_at']<=utcnow():return False
     return bool(assessment and assessment.get('engine_version')==ENGINE_VERSION and assessment.get('context_hash')==context_hash(con,oid))
 
 @lru_cache(maxsize=12)
@@ -65,6 +71,9 @@ class EvidenceAccess:
         from .action_policy import SOFT_HOLDS,SAFE_SCOPES
         return self.record('overview',{'ref':'account','kind':'deterministic_account_evidence','account':e,
             'status':self.opp['status'],'context_hash':self.version,
+            'commercial_eligibility':__import__('clearline.commercial',fromlist=['eligibility']).eligibility(self.store,self.oid),
+            'detected_signals':self.store.rows('SELECT * FROM commercial_signals WHERE opportunity_id=? AND active=1',(self.oid,)),
+            'internal_resolutions':self.store.rows('SELECT * FROM investigation_resolutions WHERE opportunity_id=?',(self.oid,)),
             'application_policy':{'ref':'workflow_policy','kind':'application_configuration',
                 'followup_days':self.settings.followup_days,
                 'hard_hold_reasons':sorted(set(self.opp['holds'])-SOFT_HOLDS),
@@ -88,7 +97,7 @@ class EvidenceAccess:
             dates=sorted({r['order_date'] for r in eligible if r['status']=='invoiced' and cents(r['line_total'])>0})
             periods[year]={'distinct_invoice_dates':dates,'purchase_dates':len(dates),'open_value_cents':sum(cents(r['line_total']) for r in eligible if r['status']=='open'),'credit_cents':sum(cents(r['line_total']) for r in eligible if r['status']=='credit_memo')}
         return self.record(f'purchases:{status}:{offset}',{'ref':'purchasing','kind':'source_rows_and_calculations','periods':periods,
-            'rows':selected[offset:offset+100],'total':len(selected),'next_offset':offset+100 if offset+100<len(selected) else None,
+            'units':{'unit_price':'USD dollars','line_total':'USD dollars','*_cents':'integer USD cents','qty':'packs or training sessions'},'rows':selected[offset:offset+100],'total':len(selected),'next_offset':offset+100 if offset+100<len(selected) else None,
             'note':'Rows preserve original quantity, unit price, line total, channel, identity, and date; open orders are not booked revenue or known overdue.'})
     def relationships(self,offset=0):
         if offset<0:raise ValueError('Invalid page')
@@ -102,7 +111,7 @@ class EvidenceAccess:
         for x in outcomes:x['ref']='outcome:'+x['id']
         return self.record(f'relationships:{offset}',{'ref':'relationship','crm':crm,'context':ctx,'messages':messages[offset:offset+100],
             'total_messages':len(messages),'next_offset':offset+100 if offset+100<len(messages) else None,'outcomes':outcomes,
-            'tasks':tasks,'investigation_tasks':self.store.rows("SELECT title,owner,reason,evidence_refs,blocking,status FROM investigation_tasks WHERE opportunity_id=?",(self.oid,)),'pending_jobs':self.store.rows("SELECT kind,due_at,status FROM jobs WHERE opportunity_id=? AND status IN ('queued','running')",(self.oid,))})
+            'tasks':tasks,'investigation_tasks':self.store.rows("SELECT id,title,owner,reason,evidence_refs,blocking,status FROM investigation_tasks WHERE opportunity_id=?",(self.oid,)),'pending_jobs':self.store.rows("SELECT kind,due_at,status FROM jobs WHERE opportunity_id=? AND status IN ('queued','running')",(self.oid,))})
     def identity(self):
         key=self.opp['account_key'];sig='|'.join(key.split('|')[1:]);related=[]
         for r in self.store.rows("SELECT id,account_key,name,state,evidence FROM opportunities WHERE workflow='recovery' AND active=1"):
@@ -146,4 +155,8 @@ class EvidenceAccess:
         def get_previous_work(offset:int=0)->str:
             """Read previous AI assessments (page by 10) and prepared drafts; these are interpretations, not verified facts."""
             return self.previous(offset)
-        return [get_account_overview,get_purchase_history,get_relationship_history,investigate_identity,get_product_catalogue,get_previous_work]
+        @function_tool
+        def get_product_associations()->str:
+            """Read reproducible portfolio product associations with sample sizes and reliability; not proof of demand."""
+            return self.record('associations',{'ref':'associations','rows':self.opp['evidence'].get('product_associations',[])})
+        return [get_product_associations,get_account_overview,get_purchase_history,get_relationship_history,investigate_identity,get_product_catalogue,get_previous_work]

@@ -170,8 +170,9 @@ class ApplicationService(BusinessAccess):
         if assessment:
             from .operations import latest_assessment
             current = latest_assessment(self.store, oid)
-            if not current or current.get('evidence_hash') != opp['evidence_hash']:
-                assessment = None
+            from .evidence import current_assessment
+            with self.store.connect() as con:
+                if not current or current.get('evidence_hash') != opp['evidence_hash'] or (opp['workflow']=='recovery' and not current_assessment(con,oid,current)):assessment=None
         return {**opp, 'drafts': drafts, 'events': events, 'assessment': assessment, 'jobs': [j for j in self.jobs() if j['opportunity_id'] == oid], 'outbox': self.store.rows('SELECT * FROM outbox WHERE opportunity_id=? ORDER BY created_at DESC', (oid,)), 'outcomes': self.store.rows('SELECT * FROM outcomes WHERE opportunity_id=? ORDER BY created_at DESC', (oid,)), 'trends': monthly_trends(self.store, self.settings, opp['evidence']) if opp['workflow'] == 'recovery' else None}
 
     def activity(self):
@@ -201,7 +202,7 @@ class ApplicationService(BusinessAccess):
         return [r for r in result if r['category'] != 'assessment' or r['id'] not in active_ids]
 
     def run_scan(self, body: ScanInput):
-        payload = {'analysis_limit': body.analysis_limit, 'policy': {'inactivity_days': body.inactivity_days, 'decline_fraction': body.decline_fraction}}
+        payload = {'analysis_limit': body.analysis_limit, 'policy': {key:getattr(body,key) for key in ('inactivity_days','decline_fraction','open_order_review_days','replenishment_min_dates','replenishment_max_cv')}}
         key='manual-scan:'+str(body.request_id) if body.request_id else None
         with self.store.connect(write=True) as con:
             if key:
@@ -277,5 +278,5 @@ class ApplicationService(BusinessAccess):
         return self.health()
 
     def schedule(self, body: ScheduleInput):
-        self.store.schedule(enabled=body.enabled, analysis_limit=body.analysis_limit, policy={'inactivity_days': body.inactivity_days, 'decline_fraction': body.decline_fraction})
+        self.store.schedule(enabled=body.enabled, analysis_limit=body.analysis_limit, policy={key:getattr(body,key) for key in ('inactivity_days','decline_fraction','open_order_review_days','replenishment_min_dates','replenishment_max_cv')})
         return self.health()

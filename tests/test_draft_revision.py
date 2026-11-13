@@ -1,3 +1,4 @@
+from commercial_fixtures import save_reviewed_fixture
 import asyncio
 import json
 import pytest
@@ -23,7 +24,10 @@ def test_revision_is_selected_idempotent_and_requires_new_approval(store,setting
     assert len(store.rows("SELECT * FROM jobs WHERE kind='revise_draft'"))==1
     with pytest.raises(ValueError,match='revising'):decide_messages(store,g['id'],selected,True)
     assert not store.rows('SELECT * FROM approvals')
-    async def revised(*args):return result()
+    async def revised(*args):
+        from clearline.evidence import ENGINE_VERSION,context_hash
+        with store.connect() as c:version=context_hash(c,args[1]['opportunity_id'])
+        return result().model_copy(update={'engine_version':ENGINE_VERSION,'context_hash':version,'evidence_hash':old['evidence_hash'],'quality':{'passed':True}})
     monkeypatch.setattr('clearline.draft_revision.rewrite',revised)
     job=store.claim(kinds=['revise_draft']);asyncio.run(execute_job(store,settings,job))
     assert store.rows('SELECT status FROM jobs WHERE id=?',(job['id'],))[0]['status']=='completed'
@@ -85,7 +89,7 @@ def test_manual_soft_edit_is_visible_debounced_and_approval_waits_for_fresh_qa(s
     from clearline.draft_revision import current_draft
     from clearline.workbench import ready_messages
     from clearline.reporting import valid_draft
-    j,a=assessed(store,opportunity,decision,['known_distributor_channel'],'channel_support');store.save_analysis(j,a)
+    j,a=assessed(store,opportunity,decision,['known_distributor_channel'],'channel_support');save_reviewed_fixture(store,j,a)
     old=store.rows('SELECT * FROM drafts')[0]
     first=store.revise_draft(old['id'],old['recipient'],old['subject'],'Would a short refresher be useful?')
     second=store.revise_draft(first,old['recipient'],old['subject'],'Would a short refresher on screening procedures help your team?')
@@ -110,7 +114,7 @@ def test_manual_soft_edit_is_visible_debounced_and_approval_waits_for_fresh_qa(s
 
 def test_manual_review_cannot_rewrite_or_use_empty_quality_result(store,opportunity,decision):
     from test_intelligence import assessed
-    j,a=assessed(store,opportunity,decision,['open_orders_require_review'],'order_status');store.save_analysis(j,a)
+    j,a=assessed(store,opportunity,decision,['open_orders_require_review'],'order_status');save_reviewed_fixture(store,j,a)
     old=store.rows('SELECT * FROM drafts')[0]
     edited=store.revise_draft(old['id'],old['recipient'],old['subject'],'Could you confirm the status of the existing order?')
     with store.connect(write=True) as c:c.execute("UPDATE jobs SET due_at='2000-01-01' WHERE kind='revise_draft'")
@@ -126,7 +130,7 @@ def test_manual_review_cannot_rewrite_or_use_empty_quality_result(store,opportun
 def test_failed_manual_review_can_be_reworked_with_human_guidance(store,opportunity,decision):
     from test_intelligence import assessed
     from clearline.draft_revision import current_draft
-    j,a=assessed(store,opportunity,decision,['known_distributor_channel'],'channel_support');store.save_analysis(j,a)
+    j,a=assessed(store,opportunity,decision,['known_distributor_channel'],'channel_support');save_reviewed_fixture(store,j,a)
     d=store.rows('SELECT * FROM drafts')[0]
     edited=store.revise_draft(d['id'],d['recipient'],d['subject'],'Please order directly from us.')
     with store.connect(write=True) as c:c.execute("UPDATE jobs SET status='failed' WHERE kind='revise_draft'")
@@ -139,7 +143,7 @@ def test_failed_manual_review_can_be_reworked_with_human_guidance(store,opportun
 
 def test_account_detail_keeps_edited_draft_visible_without_approval(store,settings,opportunity,decision):
     from test_intelligence import assessed
-    j,a=assessed(store,opportunity,decision,['open_orders_require_review'],'order_status');store.save_analysis(j,a)
+    j,a=assessed(store,opportunity,decision,['open_orders_require_review'],'order_status');save_reviewed_fixture(store,j,a)
     d=store.rows('SELECT * FROM drafts')[0]
     edited=store.revise_draft(d['id'],d['recipient'],d['subject'],'Can you confirm the current order status?')
     api=TestClient(create_app(settings))

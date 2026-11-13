@@ -1,0 +1,72 @@
+{
+  "phase": "Stable Phases 1\u20132",
+  "engine": "commercial-5.3",
+  "accounts": 486,
+  "outcomes": {
+    "human_verification": 252,
+    "internal_investigation": 83,
+    "monitor": 11,
+    "no_action": 140
+  },
+  "commercial_evaluation": {
+    "cases": 44,
+    "positive": 22,
+    "negative": 22,
+    "distinct_anonymized_evidence_sets": 41,
+    "agreement": 44,
+    "independent_accepted": 44,
+    "critical_failures": [],
+    "repeated_healthy_controls": [
+      [
+        "eval-03",
+        "eval-07",
+        "eval-27",
+        "eval-35"
+      ]
+    ],
+    "outcomes": {
+      "contact": 15,
+      "no_action": 22,
+      "internal_investigation": 5,
+      "human_verification": 2
+    },
+    "incremental_evaluation_usage": {
+      "judgment-53-distinct": {
+        "responses": 199,
+        "cost_usd": 3.0280957
+      },
+      "judgment-boundary": {
+        "responses": 20,
+        "cost_usd": 0.27901159999999997
+      }
+    },
+    "earlier_work_estimate_usd": 69.8535393,
+    "live_brief_estimate_usd": 0.076102,
+    "estimated_total_usd": 73.2367486
+  },
+  "backend_tests": 277,
+  "frontend_tests": 46,
+  "production_build": "passed; unchanged frontend since recorded build",
+  "local_mcp": "38 authenticated tools; unauthorized returns 401",
+  "external_chatgpt_tunnel": "not verified",
+  "evidence_sha256": {
+    "live-final-build.log": "f05f3d6d8a738501720d234c0618da697bd8f27e58d5356660a4cb824f31dc64",
+    "expanded-evaluation-summary.json": "cad360352619fe1150ae56301360823b8158f711c9e294a2ae775dd76199ca83",
+    "overnight-stable-ui.log": "f02b4abec1f519e7c75c55694257f2b979f33b3cd052a33ec41fe6ce8e239217",
+    "overnight-stable-tests.log": "cdb4c298ab5bd51b0e0ffd860ea333df58163f5287c95c08c9a84536141e486a",
+    "final-live-acceptance.json": "fc754ee03116d4d35d8a4299266f5365c277ea5de1b6db80788912b2773db06d",
+    "live-http-mcp.json": "d94e4bb819dfe26c93d7f893e5a31471b977d23a805dfb146e3f7c38e85cb080"
+  },
+  "baseline_sha256": "73b0711d84a278e0a7f802044c494796b99f7847b0f1e3a637c15a3166b125ac",
+  "source_sha256": {
+    "crm_accounts.csv": "036da1d5a2098726aa8c79fe2498c9b4d5700d82a2ccc1db9f7fe5d50f87252d",
+    "products.csv": "45043d6e34b6cd81edf55fdec861f6e387e20613771d3cfe99ebfcff144471f7",
+    "orders.csv": "6a3a773804c44e2d81adb1a21a083413bb1cd590a16f564549f7dd3a74c81e0a",
+    "public_agencies.csv": "56d0141e3e49a64c7436360e220e8b10036c9fe95ec1ebe3874a9134504049af"
+  },
+  "limitations": [
+    "No source record has verified recipient authorization; zero justified external actions.",
+    "Independent commercial reviewer uses fresh context in same model family; no achieved sales claim.",
+    "Original private evaluation artifacts and reset baseline stay local and ignored."
+  ]
+}

@@ -47,6 +47,9 @@ class ScanPolicy:
     cadence_multiplier: float = 1.5
     decline_fraction: float = 0.25
     minimum_prior_revenue: float = 1000
+    open_order_review_days: int = 30
+    replenishment_min_dates: int = 4
+    replenishment_max_cv: float = .5
 
 
 def cents(value):
@@ -67,6 +70,7 @@ def scan(folder, policy=ScanPolicy(), include_all=False):
     as_of = pd.Timestamp(policy.as_of)
     if not 0 < policy.decline_fraction < 1 or policy.inactivity_days < 1 or policy.cadence_multiplier <= 0:
         raise ValueError("Invalid scan thresholds")
+    if policy.open_order_review_days<1 or policy.replenishment_min_dates<4 or policy.replenishment_max_cv<=0:raise ValueError('Invalid commercial review thresholds')
     orders, oh = _read(folder, "orders", ["order_id", "order_date", "bill_to_account", "end_customer", "ship_to_city", "ship_to_state", "sales_channel", "sku", "qty", "unit_price", "line_total", "status"])
     products, ph = _read(folder, "products", ["sku", "name", "tests_per_pack", "list_price_until_2025_06_30", "list_price_from_2025_07_01"])
     crm, ch = _read(folder, "crm_accounts", ["crm_id", "account_name", "state", "owner", "notes", "last_contacted"])
@@ -214,6 +218,18 @@ def scan(folder, policy=ScanPolicy(), include_all=False):
                 'prior_cents':0,'current_cents':0,'decline_cents':0,'prior_tests':0,'current_tests':0,'signals':[],'holds':holds,'products':[],
                 'limits':['No confidently linked orders. Verify identity and direct/distributor purchase history before classifying recovery or net-new status.','CRM notes have no independent timestamp.']}
             opportunities.append({'id':digest(key)[:20],'account_key':key,'name':name,'state':evidence['state'],'decline_cents':0,'holds':holds,'evidence':evidence,'evidence_hash':digest(evidence)})
+    from .commercial import associations, detect, CommercialPolicy, purchased_skus, parse_date
+    commercial_policy=CommercialPolicy(open_review_days=policy.open_order_review_days,cadence_min_dates=policy.replenishment_min_dates,cadence_multiplier=policy.cadence_multiplier,cadence_max_cv=policy.replenishment_max_cv)
+    association_rows=associations([item['evidence'] for item in opportunities],commercial_policy)
+    raw_records=orders.to_dict('records')
+    for item in opportunities:
+        e=item['evidence']
+        assigned=[r | {'ref':f"orders:{r['source_row']}"} for r in raw_records if int(r['source_row']) in set(e.get('source_rows',[]))]
+        item['owned_product_skus']=sorted(purchased_skus(assigned,parse_date(e['as_of'])))
+        e['commercial_signals']=detect(e,assigned,association_rows,commercial_policy)
+        e['commercial_policy']=__import__('dataclasses').asdict(commercial_policy)
+        owned=set(item['owned_product_skus']);displayed={p['sku'] for p in e.get('products',[])}
+        e['product_associations']=[a for a in association_rows if a['antecedent'] in displayed or (a['reliable'] and a['antecedent'] in owned and a['consequent'] not in owned)]
     # Invalidate reasoning on relevant row-level changes even when aggregate totals are unchanged.
     raw_order_fields=['source_row','order_id','order_date','bill_to_account','end_customer','ship_to_city','ship_to_state','sales_channel','sku','qty','unit_price','line_total','status']
     for item in opportunities:

@@ -1,3 +1,131 @@
+# Commercial intelligence overhaul — commercial-5.3
+
+Validated locally on November 13, 2026. The current implementation separates discovery,
+investigation, strategy selection, independent decision review, action preparation and
+human approval. Contact is one possible intervention; internal work, verification,
+monitoring, deferral and no action do not require an email.
+
+## Current acceptance results
+
+- All 486 source account records have current reviewed assessments. Every active signal
+  has exactly one documented disposition; the current dataset contains 1,057 signals.
+- 252 accounts require human verification, 83 require internal investigation, 11 are
+  monitored and 140 receive no action. No source-account email is currently commercially
+  eligible: the supplied records contain no verified recipient/relationship authorization.
+  This is a business-data limitation, not a claim that all opportunities lack value.
+- The 245 old recovery drafts retain their exact text and history. Their replacement
+  decisions are 143 verification, 65 internal investigation, 9 monitoring and 28 no action.
+- The 92 old channel drafts comprise 3 distributor buyers, 41 institutions with direct
+  purchase history, and 48 distributor-only institutions. Replacement decisions are
+  51 verification, 22 internal investigations, 5 monitoring and 14 no action.
+- Source CSV hashes, financial totals, approvals, outbox entries, messages and outcomes
+  match the preserved before-state. Existing source ambiguities were not silently resolved.
+
+| Capability | Detected records, all assessed |
+| --- | ---: |
+| Inactive recovery | 53 |
+| Partial purchasing decline | 204 |
+| Product deterioration | 366 |
+| Missed replenishment | 58 |
+| Distributor own purchasing decline | 1 |
+| Aging open orders | 45 |
+| Cross-sell candidates | 177 |
+| Purchasing obstacles | 108 |
+| Credit/relationship-risk investigation | 45 |
+
+These counts overlap and some categories contain multiple records per account. The existing
+Overview charts retain their narrower display segments (for example, partial decline excludes
+inactive accounts), so those customer counts are not the full signal-record counts above. Associated
+amounts are not additive or forecasts. Product ownership now uses all supplied invoices,
+including dates outside the two comparison windows. Associations remain hypotheses requiring
+customer relevance; CRM concerns are not assumed to be current.
+
+## Commercial evaluation and limitations
+
+The final expanded evaluation scored **44/44 (100%)** against expectations fixed before execution:
+22 positive cases and 22 negative cases, spanning all nine action categories. There are 41
+unique anonymized evidence sets; four identical healthy controls are retained and reported,
+not portrayed as four independent situations. The additional cases cover exact decline and
+order-age boundaries, price increases hiding falling quantities, irregular ordering, and
+previous product ownership outside comparison periods. These are bounded synthetic checks,
+not proof of real-world revenue uplift.
+
+The earlier repeated-scenario evaluation remains available: 38/40 (95%), with two disagreements
+about undated training notes after recent contact. The expanded suite explicitly expects
+verification when current need is not established; that expectation was set before the new run.
+Both the original misses and the expanded sources/results are preserved.
+
+Fresh-context evaluation accepted all 44 final strategies with zero critical failures. All eight
+named portfolio regressions also passed independent review. The first named review reported a
+Juniper Hills failure because the evaluator input omitted persisted task state. That failed report
+is retained alongside the corrected input and repeated 8/8 review. Reviewers see evidence and
+final strategy without the original supervisor verdict or expected answer; this is independent
+context using the configured model, not a claim of model-family independence.
+
+Range Line now investigates its own aging orders before outreach. Granite Falls investigates
+the credit. Kimball checks what its recent contact resolved despite purchasing growth.
+Boulder Ridge receives no same-day-overdue email. Hawk and Juniper use training evidence
+without inventing a current request; Lone Tree prioritizes the purchasing handoff; Iron
+preserves the distributor route. Actual authorization remains missing in each contact candidate.
+
+## Reliability and controls
+
+- 277 backend tests and 46 UI tests pass; the production build passes using Webpack.
+- Positive/negative detection fixtures pass completely, including same-day orders, irregular
+  cadence, product ownership outside comparison periods, weak associations and healthy accounts.
+- Individual, grouped and MCP approval paths enforce the same exact-version, evidence,
+  recipient and prerequisite checks. A simulated address grants no relationship permission.
+- Approval-only bookkeeping cannot become a circular prerequisite to preparing a proposal.
+  Real missing-business-fact tasks remain blocking. Pending tasks can be reused by their ID
+  and exact evidence scope; a changed task cannot silently overwrite another investigation.
+- Source changes, responses, verified findings, authorization and meaningful elapsed time
+  invalidate cached reasoning. A new noncontact strategy cancels unexecuted follow-ups,
+  retaining prior sends and approvals. Retry/backoff is persistent; rate limits and clustered
+  provider failures reduce concurrency, without treating one gateway error as a quota limit.
+- A real-model synthetic conversation passed initial approval, simulated delivery, inbound
+  training request, useful reply generation, fresh approval, duplicate prevention and reset.
+  No portfolio email was approved by the implementation or evaluation scripts.
+- The full 486-account import and baseline capture/reset passed both rehearsal and live checks.
+  The guarded import skipped no accounts, preserved all original activity, backed up the session
+  and archived the previous reset baseline. The final baseline includes the new decisions and briefing.
+- Live HTTP and authenticated MCP reads pass; all 38 tools remain available under the same local
+  authentication and approval controls. Unauthenticated MCP requests return 401. This does not
+  establish an external ChatGPT tunnel connection.
+- Browser checks verified current account recommendations, finding/authorization controls,
+  grouped tasks and correct empty-outreach states. Action groups now separate orders/credits,
+  contacts/routes, training/product needs and other facts. Group counts overlap; they cover 335
+  current investigation/verification accounts. Dormant prerequisites remain in account history.
+  No UI download control is invented for these groups.
+
+Recorded estimates are $59.10 for portfolio assessment/corrections and named reviews, and
+approximately **$73.24 total** including development trials, all evaluation runs,
+synthetic conversations and live brief generation. These use provider usage and configured
+prices, not a billing invoice; failures without returned usage may be undercounted.
+`runtime/commercial-v5/expanded-evaluation-summary.json` records the components.
+
+Reproduce the final judgment set with `scripts/evaluate_commercial_judgment.py --review` and
+`--review --supplemental --output-dir runtime/judgment-boundary`; both accept `--env-file`.
+These create isolated synthetic fixtures and never approve or send portfolio emails.
+
+Private evidence is in `runtime/commercial-v5/`: portfolio acceptance, both independent named
+reviews, the full synthetic evaluation, conversation/reset results, preserved snapshots and
+promotion records. No credentials or original CSVs are copied into tracked source files.
+No GitHub push, cloud deployment or real email integration is part of this change.
+
+## Review and next steps
+
+Review the account recommendations and missing-business-fact tasks for Range Line, Hawk,
+Lone Tree, Juniper Hills, Iron and Boulder Ridge. Record only genuine findings and recipient
+relationship evidence; those actions trigger reassessment. Do not use a fabricated contact
+in the source portfolio to make the approval queue look populated. The separate labeled
+synthetic conversation fixture demonstrates the complete approved-send/reply workflow.
+Real fulfillment status, current customer needs, recipient authority and commercial terms
+remain unverified where the supplied data does not establish them.
+
+---
+
+> Historical implementation report for recovery-4. The commercial-5 overhaul above supersedes its execution rules; these earlier results are retained as the before-state.
+
 # Phase 1 agentic recovery overhaul — November 13, 2026
 
 Implemented, evaluated and imported into the local demo. All 486 recovery account records have current `recovery-4` assessments. The original CSVs, financial methods and demo baseline are unchanged. No real messages, GitHub push or cloud deployment occurred. Private execution evidence remains in ignored `runtime/overhaul/`.

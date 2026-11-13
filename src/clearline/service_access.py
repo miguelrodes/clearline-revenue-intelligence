@@ -22,6 +22,43 @@ def page(rows,offset=0,limit=25):
     return {'items':rows[offset:offset+limit],'total':len(rows),'offset':offset,'limit':limit,'next_offset':offset+limit if offset+limit<len(rows) else None}
 
 class BusinessAccess:
+    def commercial_signals(self,oid=None):
+        if oid:self.account(oid)
+        rows=self.store.rows('SELECT * FROM commercial_signals WHERE active=1'+(' AND opportunity_id=?' if oid else ''),(oid,) if oid else ())
+        from .evidence import context_hash
+        with self.store.connect() as con:contexts={r['opportunity_id']:context_hash(con,r['opportunity_id']) for r in rows}
+        for row in rows:
+            row['evidence']=json.loads(row['evidence'])
+            if row['assessment_context']!=contexts[row['opportunity_id']]:row['investigation_status']='pending'
+
+        return {'signals':rows,'count':len(rows),'assessed':sum(r['investigation_status']=='assessed' for r in rows),'note':'Overlapping signals are not additive revenue.'}
+
+    def authorize_contact(self,oid,recipient,role,route,evidence,authorized):
+        from .store import utcnow
+        account=self.account(oid)
+        if account['workflow']!='recovery':raise ValueError('Recovery accounts only')
+        if route not in ('direct','distributor') or not all(str(v).strip() for v in (recipient,role,evidence)):raise ValueError('Recipient, role, relationship route and supporting evidence are required')
+        import re
+        if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',recipient):raise ValueError('Enter a valid recipient email address')
+        if recipient.lower().endswith('.invalid'):raise ValueError('A simulator address does not establish contact eligibility')
+        if not account['account_key'].startswith('DISTRIBUTOR|') and 'known_distributor_channel' in account['holds'] and route!='distributor':raise ValueError('Preserve distributor route; downstream direct permission needs separately verified channel policy')
+        with self.store.connect(write=True) as con:
+            con.execute('INSERT INTO contact_authorizations VALUES(?,?,?,?,?,?,?) ON CONFLICT(opportunity_id) DO UPDATE SET recipient=excluded.recipient,role=excluded.role,route=excluded.route,evidence=excluded.evidence,authorized=excluded.authorized,updated_at=excluded.updated_at',(oid,recipient,role,route,evidence,int(authorized),utcnow()))
+            self.store.event('contact_authorization_recorded',{'recipient':recipient,'route':route,'evidence':evidence,'authorized':authorized},opportunity_id=oid,con=con)
+        return {'job_id':self.store.queue_analysis(oid,investigation=True),'requires_reassessment':True}
+
+    def resolve_investigation(self,task_id,resolution):
+        from .store import utcnow
+        if not resolution.strip():raise ValueError('Explain the verified finding; completion alone is not evidence')
+        rows=self.store.rows("SELECT * FROM investigation_tasks WHERE id=? AND status='pending'",(task_id,))
+        if not rows:raise ValueError('Pending investigation task not found')
+        task=rows[0]
+        with self.store.connect(write=True) as con:
+            con.execute('INSERT INTO investigation_resolutions VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET resolution=excluded.resolution,updated_at=excluded.updated_at',(task_id,task['opportunity_id'],resolution,utcnow()))
+            con.execute("UPDATE investigation_tasks SET status='resolved' WHERE id=?",(task_id,))
+            self.store.event('investigation_resolved',{'task_id':task_id,'resolution':resolution},opportunity_id=task['opportunity_id'],con=con)
+        return {'job_id':self.store.queue_analysis(task['opportunity_id'],investigation=True),'requires_reassessment':True}
+
     def query_accounts(self,q='',workflow='recovery',signal=None,queue=None,status=None,actionable_only=False,uncontacted=False,min_decline_cents=None,sort='decline',offset=0,limit=25):
         from .store import STOPPED_STATUSES
         from .signal_views import disposition

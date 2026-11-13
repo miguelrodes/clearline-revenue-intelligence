@@ -29,7 +29,7 @@ def ready_messages(store):
         key=origin if origin!='initial' else primary_opportunity(signals)
         if origin=='initial' and a.get('engine_version') and a.get('action_scope') in ('support','order_status','channel_support'):key=a['action_scope']
         if o['workflow']=='prospecting':key='prospect_'+key
-        rows.append({'id':o['id'],'name':o['name'],'state':o['state'],'workflow':o['workflow'],
+        rows.append({'id':o['id'],'account_key':o['account_key'],'name':o['name'],'state':o['state'],'workflow':o['workflow'],
                      'decline_cents':o['decline_cents'],'products':[p['sku'] for p in o['evidence'].get('products',[])],
                      'strategy':a.get('strategy','personalized outreach'),'recommended_action':a.get('recommended_action','Review the prepared email.'),
                      'group_key':key,'revision':revisions.get(o['id']),'revision_note':a.get('revision_note'),'draft':{**d,'analysis':a,'snapshot_hash':store.draft_hash(d),'can_review':True}})
@@ -82,12 +82,32 @@ def work_groups(store,now=None,workflow=None):
     tasks=store.rows("SELECT t.*,o.name,o.workflow FROM commercial_tasks t JOIN opportunities o ON o.id=t.opportunity_id WHERE t.status='pending' ORDER BY t.created_at")
     members=[{'id':t['opportunity_id'],'name':t['name'],'workflow':t['workflow'],'recommended_action':t['title'],'status':'needs_information','task_id':t['id']} for t in tasks if workflow is None or t['workflow']==workflow]
     add('conversation_tasks','Resolve customer requests','accounts',members,'These customers have replied. Review the suggested next step before continuing outreach.','Review customer requests',0,status='needs_information',amount=False)
-    verification=store.rows("SELECT t.*,o.name,o.workflow,o.decline_cents FROM investigation_tasks t JOIN opportunities o ON o.id=t.opportunity_id WHERE t.status='pending' AND o.active=1 ORDER BY t.blocking DESC,o.decline_cents DESC")
-    members=[{'id':t['opportunity_id'],'name':t['name'],'workflow':t['workflow'],'decline_cents':t['decline_cents'],
-              'recommended_action':t['title']+' — '+t['reason'],'owner':t['owner'],'task_id':t['id'],'blocking':bool(t['blocking'])} for t in verification if workflow is None or t['workflow']==workflow]
-    add('verification_tasks','Provide the missing business information','accounts',members,
-        'The agents have checked the available records. These specific questions need a person’s confirmation; each customer includes the requested next step.',
-        'Review agent findings',2,status='needs_information')
+    verification=store.rows("SELECT t.*,o.name,o.workflow,o.account_key,o.decline_cents FROM investigation_tasks t JOIN opportunities o ON o.id=t.opportunity_id WHERE t.status='pending' AND o.active=1 ORDER BY t.blocking DESC,o.decline_cents DESC")
+    # Presentation groups use only existing pending work. Dormant prerequisites
+    # stay on the account, but no-action/monitoring decisions are not a daily to-do.
+    import re
+    buckets={}
+    for t in verification:
+        if workflow is not None and t['workflow']!=workflow:continue
+        account=all_accounts.get(t['opportunity_id'],{})
+        current=bool(account.get('engine_version'))
+        if current and account.get('status') in {'no_action','monitor','defer'}:continue
+        title=t['title'].lower()
+        key=('orders' if re.search(r'\b(order\w*|invoice\w*|fulfil\w*|ship\w*|credit\w*|refund\w*|cancel\w*)\b',title) else
+             'contacts' if re.search(r'contact|recipient|authoriz|identity|match|mapping|route|relationship',title) else
+             'needs' if re.search(r'train|product|need|interest|procure|budget',title) else 'records') if current else 'legacy'
+        buckets.setdefault(key,[]).append({'id':t['opportunity_id'],'account_key':t['account_key'],'name':t['name'],'workflow':t['workflow'],'decline_cents':t['decline_cents'],
+              'recommended_action':t['title']+' — '+t['reason'],'owner':t['owner'],'task_id':t['id'],'blocking':bool(t['blocking'])})
+    definitions={
+        'orders':('Check open orders and credits','The agents identified specific order or credit records to check. Ask the named internal owner for the missing status or explanation, then record the finding on the customer.','Review order and credit checks',1),
+        'contacts':('Confirm purchasing contacts and buying routes','The agents found a potential commercial reason to act, but the contact or relationship is unverified. Confirm the existing purchasing contact and permitted route before outreach.','Review contact checks',2),
+        'needs':('Confirm training and product needs','The records mention a possible training, product or purchasing need. Check the existing notes with the named owner and record whether it is still relevant.','Review customer needs',2),
+        'records':('Complete the remaining account checks','The agents have identified specific missing facts. Review each saved question and record a supported answer; do not contact customers just to fill these gaps.','Review account checks',3),
+        'legacy':('Provide the missing business information','The agents have checked the available records. These specific questions need a person’s confirmation; each customer includes the requested next step.','Review agent findings',2),
+    }
+    for key,members in buckets.items():
+        title,why,button,rank=definitions[key]
+        add('verification_tasks' if key=='legacy' else 'investigation:'+key,title,'accounts',members,why,button,rank,status='needs_information')
     # Replies without a finished draft remain visible, including held/real-prospect cases.
     replies=[a for a in accounts+real if a['status']=='replied']
     add('replies_pending','Customer replies being reviewed','accounts',replies,'A response was recorded. The agent is preparing a recommendation; review any unresolved questions here.','Review replies',0,status='preparing',amount=False)

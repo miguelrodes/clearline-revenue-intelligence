@@ -54,6 +54,25 @@ def create_app(settings=None):
 
 
 
+    class AuthorizationInput(BaseModel):
+        recipient:str
+        role:str
+        route:Literal['direct','distributor']
+        evidence:str
+        authorized:bool
+    class InvestigationResolution(BaseModel):
+        resolution:str
+    @app.get('/api/commercial-signals')
+    def commercial_signals(oid:str|None=None):return service.commercial_signals(oid)
+    @app.get('/api/accounts/{oid}/commercial-work')
+    def commercial_work(oid:str):
+        service.account(oid)
+        return {'signals':service.commercial_signals(oid),'tasks':store.rows("SELECT * FROM investigation_tasks WHERE opportunity_id=? AND status='pending'",(oid,)), 'authorizations':store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(oid,))}
+    @app.post('/api/accounts/{oid}/contact-authorization')
+    def authorize_contact(oid:str,body:AuthorizationInput):return service.authorize_contact(oid,**body.model_dump())
+    @app.post('/api/investigations/{task_id}/resolve')
+    def resolve_investigation(task_id:str,body:InvestigationResolution):return service.resolve_investigation(task_id,body.resolution)
+
     @app.get("/api/health")
     def get_health():
         return service.get_health()

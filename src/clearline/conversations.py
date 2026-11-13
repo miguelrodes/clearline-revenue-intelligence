@@ -81,6 +81,8 @@ def ingest_message(store,oid,parent_id,external_id,body,sender=None):
         con.execute("UPDATE commercial_tasks SET status='superseded',updated_at=? WHERE opportunity_id=? AND status IN ('pending','awaiting_approval','approved')",(now,oid))
         if policy(con,oid)!='stop' and o['status'] not in STOPPED_STATUSES-{'replied'}:con.execute("UPDATE opportunities SET status='replied',updated_at=? WHERE id=?",(now,oid))
         con.execute("UPDATE conversations SET status='analyzing_reply',updated_at=? WHERE id=?",(now,parent['conversation_id']))
+        from .commercial import refresh_message_signals
+        refresh_message_signals(con,oid,now)
         jid=store._enqueue(con,'reply',{'evidence_hash':o['evidence_hash'],'outcome_id':outcome,'message_id':mid},oid,'reply:'+outcome)
         store.event('inbound_received',{'message_id':mid,'reply_to':parent_id,'simulated':True},jid,oid,con=con)
         return {'message_id':mid,'job_id':jid,'duplicate':False}
@@ -136,7 +138,9 @@ def save_reply(store,job,result):
         if not blocked and outreach_policy!='stop' and d.decision=='pursue' and not permitted(o,data,outreach_policy):
             if data.get('engine_version')==ENGINE_VERSION:raise ValueError('Reply proposal violates execution boundaries')
             state='agent_held';data.update(decision='hold',subject='',body='');conversation_state='needs_information'
-        if d.decision=='hold':state='agent_held'
+        if d.decision=='hold':state=(data.get('commercial_plan') or {}).get('outcome','agent_held')
+        from .commercial import persist_investigation,execution_issues
+        if state=='awaiting_approval' and execution_issues(con,o['id'],data):raise ValueError('Reply requires resolved prerequisites and authorized recipient')
         if outreach_policy=='stop':data.update(subject='',body='')
         con.execute("INSERT INTO customer_context(opportunity_id,outreach_policy,updated_at) VALUES(?,?,?) ON CONFLICT(opportunity_id) DO UPDATE SET outreach_policy=excluded.outreach_policy,updated_at=excluded.updated_at",(o['id'],outreach_policy,now))
         for field in ('contact','channel'):
@@ -145,7 +149,8 @@ def save_reply(store,job,result):
                 con.execute('UPDATE customer_context SET '+field+'=? WHERE opportunity_id=?',(json.dumps(value),o['id']))
         if data.get('engine_version')==ENGINE_VERSION:
             data['context_hash']=context_hash(con,o['id'])
-            data['quality']['proposal_hash']=proposal_fingerprint(data)
+            if data.get('quality'):data['quality']['proposal_hash']=proposal_fingerprint(data)
+        persist_investigation(con,o['id'],data,now)
         data.update(effective_status=state,conversation_status=conversation_state,outreach_policy=outreach_policy,simulated=True)
         con.execute('INSERT INTO reply_interpretations VALUES(?,?,?,?) ON CONFLICT(message_id) DO UPDATE SET job_id=excluded.job_id,body=excluded.body,created_at=excluded.created_at',(m['id'],job['id'],json.dumps(data),now))
         con.execute("UPDATE messages SET status='processed' WHERE id=?",(m['id'],))
@@ -155,6 +160,7 @@ def save_reply(store,job,result):
         # Keep the existing assessment read model's route field scalar.
         analysis['reported_channel']=data['channel']
         analysis['channel']=data['channel']['route'] if data['channel'] else None
+        if analysis.get('quality'):analysis['quality']['proposal_hash']=proposal_fingerprint(analysis)
         if job['payload'].get('regenerate_id'):
             con.execute("UPDATE drafts SET status='superseded' WHERE id=?",(job['payload']['regenerate_id'],))
         if state=='awaiting_approval':

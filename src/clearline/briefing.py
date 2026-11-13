@@ -69,7 +69,8 @@ def snapshot(store):
         actions[-1]['workflow_instructions']=(
             'Open Review request, copy the prepared request or download its customer CSV, and share it with the named team outside this application. This request has no approval or sending control. After source records are corrected, refresh portfolio intelligence; copying does not resolve the checks.' if g['kind']=='check' else
             'Open the email group, review or edit saved drafts, select messages, and approve simulated sending. These are ready for that review; do not add new verification requirements.' if g['kind']=='messages' else
-            'Review the saved schedule and prior email topic. Agents prepare follow-ups when due; drafts require approval before simulated sending.' if g['id']=='followups' else g['why'])
+            'Review the saved schedule and prior email topic. Agents prepare follow-ups when due; drafts require approval before simulated sending.' if g['id']=='followups' else
+            'Open the saved customer task, consult the named internal owner, and record a verified finding or contact authorization on the customer. This automatically triggers reassessment. This group has no copy/download, email-approval or sending controls.' if g['id'].startswith('investigation:') else g['why'])
         if g['id']=='followups':
             names=list(dict.fromkeys(m['name'] for m in members))
             actions[-1]['title']='Follow up with '+(', '.join(names) if len(names)<=2 else names[0]+f' and {len(names)-1} other customers')
@@ -86,10 +87,11 @@ def snapshot(store):
     if any(g['id']=='replies_pending' for g in work['groups']):facts['responses']='The agents are reviewing recorded customer replies.'
     if any(g['id']=='contacts' for g in work['groups']):facts['contacts']='Some promising customers still need a purchasing contact.'
     if work['checks']['priority_records']:facts['checks']='Requests for missing customer information are prepared for your team.'
+    if any(g['id']=='verification_tasks' or g['id'].startswith('investigation:') for g in work['groups']):facts['verification']='The agents have prepared specific internal checks; record the findings before reconsidering outreach.'
     if not facts:facts['clear']='No decisions are waiting. Scheduled work will continue while the agents are running.'
     jobs=store.rows("SELECT id,kind,opportunity_id,status,due_at FROM jobs WHERE status IN ('queued','running','failed','blocked_config') AND kind!='revenue_brief' ORDER BY id")
     from .signal_views import signal_context
-    return {'version':10,'signals':signal_context(store),'actions':ranked,'facts':facts,'record_checks':work['checks'],'execution':jobs,
+    return {'version':12,'signals':signal_context(store),'actions':ranked,'facts':facts,'record_checks':work['checks'],'execution':jobs,
             'limitations':['Historical decline is not a recovery forecast. No incremental-revenue estimate is supported.',
                            'Clearline identities are fictional. Real SwabTek prospects and all simulated communications remain distinct.',
                            'Open order age does not establish overdue status; expected fulfillment dates are unavailable.']}
@@ -194,9 +196,12 @@ def render_brief(output, state):
         import re
         if r.description and (re.search(r'[0-9$€£]|https?://|guarantee|definitely|overdue order',wording,re.I) or len(wording.split())>100):
             raise ValueError('Brief prose must not add quantities, promises, URLs or unsupported urgency')
+        if a['id'].startswith('investigation:') and re.search(r'\b(copy|download|externally|rescan)\b',wording,re.I):
+            raise ValueError('Investigation descriptions must use actual customer-task controls, not legacy export workflows')
         actions.append({k:a[k] for k in ('id','title','href','accounts','historical_decline_cents')} | {'why':wording,'button_label':a.get('button_label','Open'),'scope_label':a.get('scope_label'),'financial_cents':a.get('financial_cents'),'financial_label':a.get('financial_label'),'urgency':a.get('urgency'),'recommended_order':a.get('recommended_order',len(actions)),'earliest_due_at':a.get('earliest_due_at'),'time_priority':a.get('time_priority',3),'members':a.get('members',[]),'team':a.get('team')})
     points=priority_points(output.priorities,catalog) if output.priorities else output.summary_points
-    priority_items=[{'action_id':p.action_id,'title':p.title or catalog[p.action_id]['title'],'text':text} for p,text in zip(output.priorities,points)]
+    category_titles={'messages:channel_support':'Buying route unclear','messages:support':'Training and product needs','verification_tasks':'Verify customer details','investigation:orders':'Orders and credits','investigation:contacts':'Purchasing contacts','investigation:needs':'Training and product needs','investigation:records':'Missing account facts'}
+    priority_items=[{'action_id':p.action_id,'title':category_titles.get(p.action_id,p.title or catalog[p.action_id]['title']),'text':text} for p,text in zip(output.priorities,points)]
     return {'summary':' '.join(points) or output.summary or ' '.join(state['facts'][f] for f in output.summary_fact_ids),'summary_points':points or ([output.summary] if output.summary else [state['facts'][f] for f in output.summary_fact_ids]),'priority_items':priority_items,'actions':actions,'signal_advice':[a.model_dump() for a in output.signal_advice]}
 
 

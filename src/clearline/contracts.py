@@ -7,6 +7,9 @@ class Input(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
 class ScanInput(Input):
+    open_order_review_days:int=Field(default=30,ge=1,le=3650)
+    replenishment_min_dates:int=Field(default=4,ge=4,le=100)
+    replenishment_max_cv:float=Field(default=.5,gt=0,le=2)
     request_id: UUID | None = None
     analysis_limit: int = Field(default=-1, ge=-1)
     inactivity_days: int = Field(default=90, ge=1, le=3650)

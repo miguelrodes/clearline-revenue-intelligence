@@ -25,12 +25,13 @@ def opportunity(store):
 
 
 @pytest.fixture
-def decision():
+def decision(store,opportunity):
     # Lightweight structured response fixture, exclusively for boundary tests.
-    return {"decision":"pursue","rationale":"Verify a possible contact change.",
+    from test_commercial import certified
+    return certified(store,opportunity["id"],{"decision":"pursue","rationale":"Verify a possible contact change.",
             "hypotheses":["Contact changed"],"evidence_fields":["crm_notes"],
             "unresolved_questions":["Who handles purchasing?"],"recommended_action":"Ask for the right contact",
-            "subject":"Purchasing contact","body":"Could you confirm the right purchasing contact?"}
+            "subject":"Purchasing contact","body":"Could you confirm the right purchasing contact?"})
 
 
 @pytest.fixture

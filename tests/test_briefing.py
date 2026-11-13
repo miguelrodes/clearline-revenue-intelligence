@@ -1,3 +1,4 @@
+from commercial_fixtures import save_reviewed_fixture,reviewed_fixture
 import asyncio
 import json
 from dataclasses import replace
@@ -26,18 +27,18 @@ def save_brief(store,state):
 
 def test_actions_are_grounded_filtered_and_read_only(store,settings,opportunity,decision):
     ids=population(store,opportunity,3)
-    cid=create_campaign(store,'Review',['0'],True);store.save_analysis(store.claim(),decision)
-    jid=store.queue_analysis('1',investigation=True);store.save_analysis(store.claim(),decision)
+    cid=create_campaign(store,'Review',['0'],True);save_reviewed_fixture(store,store.claim(),decision)
+    jid=store.queue_analysis('1',investigation=True);save_reviewed_fixture(store,store.claim(),decision)
     state=snapshot(store);save_brief(store,state)
     rendered=current_brief(store)['brief']
-    assert rendered and len(rendered['actions'])==3
-    assert next(a for a in rendered['actions'] if a['id']=='contacts')['accounts']==1
+    assert rendered and len(rendered['actions'])==2
+    assert not any(a['id']=='contacts' for a in rendered['actions']) # already authorized fixtures
     campaign=next(a for a in rendered['actions'] if a['id'].startswith('messages:'))
     assert campaign['href']=='/actions?group=messages%3Ainactivity'
-    assert campaign['historical_decline_cents']==10000
+    assert campaign['historical_decline_cents']==20000
     api=TestClient(create_app(settings))
     before=len(store.rows('SELECT * FROM jobs'))
-    assert [a['id'] for a in api.get('/api/opportunities?queue=contacts').json()]==['1']
+    assert not api.get('/api/opportunities?queue=contacts').json()
     assert [a['id'] for a in api.get('/api/opportunities?queue=unassessed').json()]==['2']
     assert api.get('/api/brief').json()['brief']['summary']==rendered['summary']
     assert len(store.rows('SELECT * FROM jobs'))==before
@@ -45,7 +46,7 @@ def test_actions_are_grounded_filtered_and_read_only(store,settings,opportunity,
 
 
 def test_stale_brief_is_hidden_after_approval_and_outcome(store,settings,opportunity,decision):
-    cid=create_campaign(store,'Review',['example'],True);store.save_analysis(store.claim(),decision)
+    cid=create_campaign(store,'Review',['example'],True);save_reviewed_fixture(store,store.claim(),decision)
     state=snapshot(store);save_brief(store,state)
     assert current_brief(store)['brief']
     d=campaign_view(store,cid)['members'][0]['draft']
@@ -90,13 +91,14 @@ def test_cache_coalesces_without_self_triggered_api_loop(store,opportunity,decis
 def test_contacts_exclude_prior_outreach_stopped_held_and_stale(store,settings,opportunity,decision):
     population(store,opportunity,4)
     for oid in ('0','1','2','3'):
-        store.queue_analysis(oid,investigation=True);store.save_analysis(store.claim(),decision)
+        store.queue_analysis(oid,investigation=True);save_reviewed_fixture(store,store.claim(),decision)
     with store.connect(write=True) as con:
         con.execute("UPDATE opportunities SET status='deferred' WHERE id='1'")
         con.execute("UPDATE opportunities SET holds=? WHERE id='2'",(json.dumps(["open_orders_require_review"]),))
         con.execute("UPDATE opportunities SET evidence_hash='changed' WHERE id='3'")
-    assert [a['id'] for a in operational_queue(store,'contacts')]==['0']
-    assert next(a for a in snapshot(store)['actions'] if a['id']=='contacts')['accounts']==1
+    assert not operational_queue(store,'contacts')
+    from clearline.workbench import ready_messages
+    assert [a['id'] for a in ready_messages(store)]==['0']
 
 
 def test_fifteen_parallel_independent_results_and_persistence(store,settings,opportunity,decision):
@@ -107,12 +109,12 @@ def test_fifteen_parallel_independent_results_and_persistence(store,settings,opp
         nonlocal active,peak
         active+=1;peak=max(peak,active)
         await asyncio.sleep(.05)
-        active-=1;return decision
+        active-=1;return reviewed_fixture(store,args[1],decision)
     asyncio.run(run_pool(store,replace(settings,concurrency=15,max_concurrency=15),analyst,drain=True,auto_brief=False))
     assert peak==15
     reopened=Store(settings.db_path)
     assert len(reopened.rows("SELECT * FROM events WHERE kind='agent_decision'"))==30
-    assert not reopened.rows('SELECT * FROM drafts')
+    assert len(reopened.rows('SELECT * FROM drafts'))==30 # each fixture is expressly authorized
     assert metrics(reopened)['capacity']['peak_investigations']==15
     assert not metrics(reopened)['active_investigations']
 
@@ -177,7 +179,7 @@ def test_brief_includes_more_than_five_actions_and_natural_summary(store,opportu
 
 def test_followup_context_uses_saved_correspondence_and_does_not_change_records(store,settings,opportunity,decision):
     cid=create_campaign(store,'Review',['example'],True)
-    store.save_analysis(store.claim(),decision)
+    save_reviewed_fixture(store,store.claim(),decision)
     draft=campaign_view(store,cid)['members'][0]['draft']
     decide_campaign(store,cid,[{'draft_id':draft['id'],'snapshot_hash':draft['snapshot_hash']}],True)
     asyncio.run(run_pool(store,settings,drain=True,auto_brief=False))
@@ -235,3 +237,13 @@ def test_priority_bullets_render_through_existing_brief_contract(store,opportuni
     assert rendered['summary_points'][0].startswith(str(action['accounts'])+' customers need investigation.')
     assert rendered['summary']==' '.join(rendered['summary_points'])
     assert len(rendered['actions'])==len(state['actions'])
+
+
+def test_investigation_brief_cannot_invent_legacy_export_controls():
+    from clearline.briefing import render_brief
+    state={'actions':[{'id':'investigation:orders','title':'Check orders','href':'/actions?group=investigation:orders','accounts':1,'historical_decline_cents':None,'reasons':{'next':'Record the missing status.'}}],'facts':{'verification':'Check missing facts.'}}
+    output={'summary_fact_ids':['verification'],'recommendations':[{'action_id':'investigation:orders','reason_id':'next','description':'Download and share externally with the orders team.'}]}
+    import pytest
+    with pytest.raises(ValueError,match='actual customer-task controls'):render_brief(output,state)
+    output['recommendations'][0]['description']='Ask the order owner for the missing status and record the finding on the customer.'
+    assert render_brief(output,state)['actions'][0]['why']==output['recommendations'][0]['description']

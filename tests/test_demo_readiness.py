@@ -1,3 +1,4 @@
+from commercial_fixtures import save_reviewed_fixture,reviewed_fixture
 import asyncio,copy,json,sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -25,9 +26,18 @@ def test_signal_reuses_campaign_actions_and_only_matching_financial_pairs(store,
     assert d['segment']['decline_cents']==20000
     assert all(a['links'][0]['group_id']=='messages:inactivity' for a in d['actions'])
     assert 'signal=inactivity' in d['groups'][0]['href']
+    for group in d['groups']:
+        assert group['why'] and group['button_label'] and isinstance(group['rank'],(int,float))
+        relevant=[a for a in d['actions'] if any(link['group_id']==group['id'] for link in a['links'])]
+        assert group['accounts']==len(relevant)
+        assert group['financial_cents']==sum(max(0,a['decline_cents']) for a in relevant)
     sku=signal_detail(store,'product_decline')
     assert sku['segment']['decline_cents']==sku['actions'][0]['decline_cents']==30000
     assert len(sku['chart'])==1 and sku['chart'][0]['prior_tests']==100
+    for group in sku['groups']:
+        assert group['financial_label'].startswith('Qualifying product decline')
+        relevant=[a for a in sku['actions'] if any(link['group_id']==group['id'] for link in a['links'])]
+        assert group['financial_cents']==sum(max(0,a['decline_cents']) for a in relevant)
     assert before=={t:len(store.rows('SELECT * FROM '+t)) for t in before}
 
 
@@ -37,7 +47,7 @@ def test_entire_portfolio_finishes_with_distinct_dispositions_and_reuses_results
     async def analyst(s,j,c):
         from clearline.evidence import ENGINE_VERSION,context_hash
         with s.connect() as con:revision=context_hash(con,j['opportunity_id'])
-        return {**decision,'engine_version':ENGINE_VERSION,'context_hash':revision,'decision':'hold' if j['opportunity_id']=='1' else 'no_action' if j['opportunity_id']=='2' else 'pursue'}
+        return reviewed_fixture(s,j,{**decision,'decision':'hold' if j['opportunity_id']=='1' else 'no_action' if j['opportunity_id']=='2' else 'pursue'})
     asyncio.run(run_pool(store,settings,analyst,drain=True,auto_brief=False))
     d=coverage(store);assert d['assessed']==d['total']==6 and d['counts']['unassessed']==d['failed']==0
     assert d['counts']['verification']==1 and d['counts']['no_action']==1 and len(store.rows("SELECT * FROM drafts WHERE status='awaiting_approval'"))==4
@@ -95,6 +105,7 @@ def test_direct_gap_chart_uses_saved_channel_gaps_not_all_channel_revenue(store,
     d=signal_detail(store,'direct_gap_channel_review');row=d['chart'][0]
     assert row['direct_gap_days']==507 and row['identified_gap_days']==124
     assert 'Named distributor purchases are present' in row['channel_evidence']
+    assert all(group['href'].endswith('signal=direct_gap_channel_review') and group['why'] for group in d['groups'])
 
 
 def test_reset_refuses_to_signal_a_reused_or_unrelated_pid(store,opportunity,tmp_path,monkeypatch):

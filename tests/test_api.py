@@ -1,3 +1,4 @@
+from commercial_fixtures import save_reviewed_fixture
 import json
 from fastapi.testclient import TestClient
 
@@ -33,6 +34,15 @@ def test_edit_approve_simulate_and_reply_survive_api_restart(settings,store,draf
     new=store.rows("SELECT * FROM drafts WHERE id=?",(r.json()['draft_id'],))[0]
     assert new['version']==2
     assert api.post(f"/api/drafts/{draft['id']}/decision",json={**payload(draft),"approve":True}).status_code==409
+    assert api.post(f"/api/drafts/{new['id']}/decision",json={**payload(new),'approve':True}).status_code==409
+    # Complete the newly mandatory independent quality review of the exact human edit.
+    from clearline.draft_revision import save_revision,RevisedEmail
+    from clearline.evidence import ENGINE_VERSION,context_hash
+    with store.connect(write=True) as c:c.execute("UPDATE jobs SET due_at='2000-01-01' WHERE kind='revise_draft'")
+    job=store.claim(['revise_draft'])
+    with store.connect() as c:version=context_hash(c,'example')
+    save_revision(store,job,RevisedEmail(subject=new['subject'],body=new['body'],review_note='Fixture reviewed exact edit',engine_version=ENGINE_VERSION,context_hash=version,evidence_hash=new['evidence_hash'],quality={'passed':True}))
+    new=store.rows("SELECT * FROM drafts WHERE opportunity_id='example' ORDER BY version DESC")[0]
     decision={**payload(new),"approve":True}
     assert api.post(f"/api/drafts/{new['id']}/decision",json=decision).status_code==200
     assert api.post(f"/api/drafts/{new['id']}/decision",json=decision).status_code==409
@@ -76,8 +86,8 @@ def test_manual_assessment_and_retry_are_bounded_and_worker_owned(settings,store
     assert not store.rows("SELECT * FROM drafts")
     async def boundary(*args): return decision
     run_one(store,settings,analyst=boundary)
-    assert api.get('/api/accounts/example').json()['status']=='needs_contact'
-    assert not api.get('/api/accounts/example').json()['drafts']
+    assert api.get('/api/accounts/example').json()['status']=='awaiting_approval'
+    assert len(api.get('/api/accounts/example').json()['drafts'])==1 # explicit fixture authorization
     assert api.post('/api/accounts/example/assess',json={**body,'rerun':True}).status_code==409
     body.update(rerun=True,request_id='00000000-0000-4000-8000-000000000001')
     rerun=api.post('/api/accounts/example/assess',json=body)

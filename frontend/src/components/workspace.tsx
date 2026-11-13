@@ -12,7 +12,7 @@ export {OpportunityTable,DraftEditor} from './detail-views';
 
 export default function Workspace(){
  const path=usePathname();const params=useSearchParams();const router=useRouter();const [menu,setMenu]=useState(false);const [query,setQuery]=useState('');
- const {data:found}=useApi<{id:string;name:string;state:string;workflow:string}[]>(`/search?q=${encodeURIComponent(query)}`);
+ const {data:found}=useApi<{id:string;name:string;state:string;workflow:string}[]>(query.trim().length>=2?`/search?q=${encodeURIComponent(query.trim())}`:null);
  const base=path==='/'?'/':'/actions';const account=params.get('account');const metric=params.get('metric');const group=params.get('group');
  function close(){const p=new URLSearchParams(params);(account?['account']:metric?['metric']:['group','focus','product','signal']).forEach(k=>p.delete(k));router.replace(path+(p.size?'?'+p:''))}
  function openAccount(id:string){const p=new URLSearchParams(params);p.set('account',id);router.push(path+'?'+p);setQuery('')}

@@ -71,7 +71,7 @@ it('renders separate sales briefing bullets with the saved explanations',async()
  const points=['Review the prepared emails and approve the customers you want to contact.','Ask the orders team to confirm pending purchases before restarting outreach.'];
  vi.mocked(fetch).mockResolvedValue({ok:true,json:async()=>({brief:{...brief,summary_points:points},stale:false,job:null})} as Response);
  render(<OperationalBriefing/>);
- const list=await screen.findByRole('list',{name:'Daily sales briefing'});
+ const list=await screen.findByRole('list',{name:'Overview brief priorities'});
  expect(list.querySelectorAll('li')).toHaveLength(2);
  for(const point of points)expect(list).toHaveTextContent(point);
 });

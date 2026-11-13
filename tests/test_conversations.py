@@ -1,3 +1,4 @@
+from commercial_fixtures import save_reviewed_fixture
 import asyncio,copy,json
 from dataclasses import replace
 import pytest
@@ -30,7 +31,7 @@ def test_reply_transitions_and_linked_history(store,sent,reply_decision,intent,s
     if intent=='reorder':d['products']=[{'description':'swabs','sku':None,'quantity':20,'unit':'packs','quote':'20 packs of swabs.'}]
     if intent=='purchasing_contact':d['contact']={'name':'Jordan Lee','email':'jordan@example.invalid','phone':None,'quote':'Jordan Lee, jordan@example.invalid, now handles purchases.'}
     if intent=='distributor':d['channel']={'route':'distributor','distributor':'Bluewater','quote':'We buy through Bluewater.'}
-    store.save_analysis(job,d);thread=conversation(store,sent['opportunity_id'])
+    save_reviewed_fixture(store,job,d);thread=conversation(store,sent['opportunity_id'])
     assert store.opportunity(sent['opportunity_id'])['status']==expected
     assert thread['messages'][1]['reply_to']==sent['id'] and thread['messages'][1]['interpretation']['intent']==intent
     assert not store.rows("SELECT * FROM jobs WHERE kind='followup' AND status='queued'")
@@ -112,7 +113,7 @@ def test_reset_run_reply_reset_run_no_duplicate_history(store,settings,draft,rep
     folder=tmp_path/'demo';initialize(store.path,folder);_,path,_=paths(folder)
     for cycle in range(2):
         s=Store(path);s.decide(draft['id'],True);job=s.claim();s.deliver(job);s.finish(job['id'])
-        sent=conversation(s,draft['opportunity_id'])['messages'][0];inject(s,sent);s.save_analysis(s.claim(),reply_decision)
+        sent=conversation(s,draft['opportunity_id'])['messages'][0];inject(s,sent);save_reviewed_fixture(s,s.claim(),reply_decision)
         d=s.rows("SELECT * FROM drafts WHERE status='awaiting_approval'")[0];s.decide(d['id'],True);j=s.claim();s.deliver(j);s.finish(j['id'])
         assert len(conversation(s,draft['opportunity_id'])['messages'])==3
         reset(folder);clean=Store(path)
@@ -134,7 +135,7 @@ def test_distributor_training_reply_keeps_channel_and_separate_approval(store,se
             'body':'Would a discussion of night-shift training needs be useful while you continue buying through Range Line Distributors?',
             'action_scope':'channel_support','quality':{'passed':True}}
     result['quality']['proposal_hash']=proposal_fingerprint(result)
-    store.save_analysis(job,result)
+    save_reviewed_fixture(store,job,result)
     thread=conversation(store,sent['opportunity_id'])
     assert thread['context']['outreach_policy']=='channel_review'
     assert store.opportunity(sent['opportunity_id'])['status']=='awaiting_approval'

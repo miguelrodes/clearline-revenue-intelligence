@@ -15,6 +15,8 @@ def assessed(store,opportunity,decision,holds=(),scope='support'):
     a={**decision,'subject':'Discuss support','body':'Would a short call to scope training for your night shift be useful?',
        'engine_version':ENGINE_VERSION,'context_hash':revision,'evidence_hash':digest(e),'action_scope':scope,
        'quality':{'passed':True},'verification_tasks':[]}
+    from test_commercial import certified
+    a=certified(store,opportunity['id'],a)
     a['quality']['proposal_hash']=proposal_fingerprint(a)
     return j,a
 

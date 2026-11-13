@@ -86,6 +86,8 @@ class Store:
             con.executescript(ACCESS_SCHEMA)
             from .evidence import SCHEMA as EVIDENCE_SCHEMA
             con.executescript(EVIDENCE_SCHEMA)
+            from .commercial import SCHEMA as COMMERCIAL_SCHEMA
+            con.executescript(COMMERCIAL_SCHEMA)
 
     def heartbeat(self, state):
         with self.connect(write=True) as con:
@@ -158,7 +160,12 @@ class Store:
         if not opp["active"] or (not investigation and (opp["holds"] or opp["status"] in STOPPED_STATUSES)):
             raise ValueError("This opportunity is held, inactive, or already stopped")
         from .evidence import context_hash,ENGINE_VERSION
-        with self.connect() as con: revision=context_hash(con,oid)
+        with self.connect(write=True) as con:
+            last=con.execute("SELECT details FROM events WHERE opportunity_id=? AND kind='agent_decision' ORDER BY id DESC LIMIT 1",(oid,)).fetchone()
+            a=json.loads(last['details']) if last else {}
+            if a.get('reassess_at') and a['reassess_at']<=utcnow():
+                con.execute("INSERT INTO controls VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",('reassessment:'+oid,a['reassess_at']))
+            revision=context_hash(con,oid)
         payload = {"context_hash":revision,"engine_version":ENGINE_VERSION,"evidence_hash": opp["evidence_hash"], "followup_of": followup_of, "portfolio": investigation, "allow_simulation": allow_simulation}
         kind = "prospect_qualify" if opp["workflow"] == "prospecting" else "analyze"
         if kind == "prospect_qualify" and not opp["evidence"].get("research"):
@@ -220,6 +227,18 @@ class Store:
                     holds=excluded.holds,active=1,updated_at=excluded.updated_at""",
                     (o["id"],o["account_key"],o["name"],o["state"],o["decline_cents"],json.dumps(o["evidence"]),
                      o["evidence_hash"],json.dumps(o["holds"]),"needs_review",utcnow()))
+                con.execute('UPDATE commercial_signals SET active=0 WHERE opportunity_id=?',(o['id'],))
+                for signal in o['evidence'].get('commercial_signals',[]):
+                    encoded=json.dumps(signal['evidence'],sort_keys=True)
+                    con.execute("""INSERT INTO commercial_signals VALUES(?,?,?,?,?,?,1,'pending',NULL,NULL,NULL,?)
+                    ON CONFLICT(id) DO UPDATE SET active=1,evidence=excluded.evidence,amount_cents=excluded.amount_cents,
+                    investigation_status=CASE WHEN commercial_signals.evidence!=excluded.evidence THEN 'pending' ELSE commercial_signals.investigation_status END,updated_at=excluded.updated_at""",
+                    (signal['id'],o['id'],signal['category'],signal['trigger_key'],encoded,signal['amount_cents'],utcnow()))
+                if 'owned_product_skus' in o:
+                    con.execute('INSERT INTO controls VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value',('purchased_skus:'+o['id'],json.dumps(o['owned_product_skus'])))
+                from .commercial import refresh_message_signals
+                refresh_message_signals(con,o['id'],utcnow())
+            con.execute('UPDATE commercial_signals SET active=0 WHERE opportunity_id IN (SELECT id FROM opportunities WHERE active=0)')
             self.event("scan_completed", summary, con=con)
 
     def claim(self, kinds=None):
@@ -300,11 +319,10 @@ class Store:
                 if analysis.get('engine_version')==ENGINE_VERSION:
                     raise ValueError('Reviewed action violates execution boundaries; no draft saved')
                 analysis.update(decision='hold',subject='',body='')
-            con.execute("UPDATE investigation_tasks SET status='superseded' WHERE opportunity_id=? AND status='pending'",(opp['id'],))
-            for task in analysis.get('verification_tasks',[]):
-                tid=digest([opp['id'],analysis.get('context_hash'),task])
-                con.execute('INSERT OR REPLACE INTO investigation_tasks VALUES(?,?,?,?,?,?,?,?,?,?)',
-                    (tid,opp['id'],analysis.get('context_hash',''),task['title'],task['owner'],task['reason'],json.dumps(task['evidence_refs']),int(task['blocking']),'pending',utcnow()))
+            from .commercial import persist_investigation,execution_issues
+            if opp['workflow']=='recovery' and analysis['decision']=='pursue' and execution_issues(con,opp['id'],analysis):
+                raise ValueError('Unresolved prerequisites or missing recipient authorization; no draft saved')
+            persist_investigation(con,opp['id'],analysis,utcnow())
             self.event("agent_decision",analysis,job["id"],opp["id"],con=con)
             if analysis.get('engine_version')==ENGINE_VERSION:
                 obsolete=con.execute("SELECT id FROM jobs WHERE opportunity_id=? AND id!=? AND kind='analyze' AND status IN ('failed','blocked_config') AND json_extract(payload,'$.followup_of') IS NULL AND (COALESCE(json_extract(payload,'$.context_hash'),'')!=? OR COALESCE(json_extract(payload,'$.engine_version'),'')!=?)",(opp['id'],job['id'],analysis.get('context_hash'),ENGINE_VERSION)).fetchall()
@@ -312,6 +330,20 @@ class Store:
                     con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE id=?",(utcnow(),previous['id']))
                     self.event('investigation_failure_superseded',{'previous_job':previous['id'],'replacement_job':job['id'],'reason':'A current reviewed assessment supersedes the failed older context.'},job['id'],opp['id'],con=con)
             preserve = opp["status"] in STOPPED_STATUSES or opp["status"] in ("approved","awaiting_response")
+            if opp['status']=='approved':
+                prior=con.execute("SELECT * FROM drafts WHERE opportunity_id=? AND status='approved' ORDER BY version DESC LIMIT 1",(opp['id'],)).fetchone()
+                saved=json.loads(prior['analysis']) if prior else {}
+                still_valid=bool(prior and saved.get('context_hash')==context_hash(con,opp['id']) and permitted(opp,saved,policy(con,opp['id']),prior))
+                if not still_valid:
+                    con.execute("UPDATE drafts SET status='superseded' WHERE opportunity_id=? AND status='approved'",(opp['id'],))
+                    con.execute("UPDATE jobs SET status='cancelled',finished_at=?,error='Approval invalidated by new evidence or commercial policy' WHERE opportunity_id=? AND kind='deliver' AND status IN ('queued','running','blocked_config')",(utcnow(),opp['id']))
+                    self.event('approval_invalidated',{'reason':'Evidence or commercial policy changed; approval history retained'},job['id'],opp['id'],con=con)
+                    preserve=False
+            if opp['status']=='awaiting_response' and analysis.get('engine_version')==ENGINE_VERSION and analysis['decision']!='pursue':
+                # Retain sent messages and outcomes, but the new commercial decision
+                # supersedes an unexecuted follow-up plan.
+                con.execute("UPDATE jobs SET status='cancelled',finished_at=?,error='Current commercial decision does not justify a follow-up' WHERE opportunity_id=? AND id!=? AND status IN ('queued','running','blocked_config') AND (kind='followup' OR (kind='analyze' AND json_extract(payload,'$.followup_of') IS NOT NULL))",(utcnow(),opp['id'],job['id']))
+                preserve=False
             contact_ready = not job["payload"].get("portfolio") or job["payload"].get("allow_simulation") or analysis.get("engine_version")==ENGINE_VERSION
             parent=job['payload'].get('followup_of')
             latest_send=con.execute('SELECT draft_id FROM outbox WHERE opportunity_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',(opp['id'],)).fetchone() if parent else None
@@ -333,6 +365,7 @@ class Store:
             else:
                 con.execute("UPDATE drafts SET status='superseded' WHERE opportunity_id=? AND status='awaiting_approval'",(opp['id'],))
                 state = "agent_held" if analysis["decision"] == "hold" else "no_action" if analysis["decision"] == "no_action" else "rejected"
+            if analysis.get('commercial_plan') and analysis['decision']!='pursue':state=analysis['commercial_plan']['outcome']
             con.execute("UPDATE opportunities SET status=?,updated_at=? WHERE id=?",(state,utcnow(),opp["id"]))
             con.execute("UPDATE jobs SET status='completed',finished_at=? WHERE id=?",(utcnow(),job["id"]))
 
@@ -376,6 +409,8 @@ class Store:
         from .evidence import context_hash,ENGINE_VERSION
         a=json.loads(d['analysis'])
         stale=bool(a.get('engine_version')) and a.get('context_hash')!=context_hash(con,opp['id'])
+        from .commercial import execution_issues
+        if approve and opp['workflow']=='recovery' and execution_issues(con,opp['id'],a):raise ValueError('Resolve blocking prerequisites and authorize the recipient before approval')
         if approve and (stale or not permitted(opp,a,policy(con,opp['id']),d) or not opp['active'] or opp['evidence_hash']!=d['evidence_hash'] or opp['status'] in STOPPED_STATUSES):
             raise ValueError("Opportunity changed or is held; reassess before approval")
         if approve and con.execute("SELECT 1 FROM jobs WHERE opportunity_id=? AND kind='revise_draft' AND status IN ('queued','running')",(opp['id'],)).fetchone():
@@ -414,6 +449,8 @@ class Store:
             from .evidence import context_hash,ENGINE_VERSION
             a=json.loads(d['analysis'])
             stale=bool(a.get('engine_version')) and a.get('context_hash')!=context_hash(con,opp['id'])
+            from .commercial import execution_issues
+            if opp['workflow']=='recovery' and execution_issues(con,opp['id'],a):raise ValueError('Commercial prerequisites changed before delivery')
             if stale or not permitted(opp,a,policy(con,opp['id']),d) or not opp['active'] or opp['evidence_hash']!=d['evidence_hash'] or opp['status'] in STOPPED_STATUSES:
                 raise ValueError("Opportunity changed or stopped; action blocked")
             con.execute("INSERT INTO outbox VALUES(?,?,?,?,?,?,?,?)",(uuid4().hex,did,opp["id"],d["recipient"],d["subject"],d["body"],"simulated",utcnow()))

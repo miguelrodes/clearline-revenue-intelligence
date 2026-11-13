@@ -24,9 +24,16 @@ def worker_lock(path):
 class Capacity:
     def __init__(self,settings):
         self.current=settings.concurrency; self.maximum=settings.max_concurrency
-        self.cooldown=0.; self.successes=0; self.headers={}; self.recent=[]; self.previous_rate=0.; self.completions=[]; self.peak=0
+        self.cooldown=0.; self.successes=0; self.headers={}; self.recent=[]; self.previous_rate=0.; self.completions=[]; self.peak=0; self.transient_failures=[]
     def limited(self,delay):
         self.current=max(1,self.current//2); self.successes=0; self.cooldown=max(self.cooldown,time.monotonic()+delay)
+    def transient_failure(self,delay):
+        # An isolated gateway failure is not evidence of a rate limit. Slow the
+        # whole pool only for a burst; each failed job still receives backoff.
+        now=time.monotonic()
+        self.transient_failures=[t for t in self.transient_failures if now-t<=60]+[now]
+        if len(self.transient_failures)>=3:
+            self.limited(delay);self.transient_failures=[]
     def completed(self,seconds):
         self.successes+=1; self.recent.append(seconds); self.recent=self.recent[-12:]
         self.completions.append(time.monotonic()); self.completions=self.completions[-24:]
@@ -103,7 +110,9 @@ async def execute_job(store,settings,job,analyst=analyze,capacity=None):
         transient=http in (408,409,429) or (http is not None and http>=500) or isinstance(exc,(TimeoutError,ConnectionError)) or type(exc).__name__ in ('APIConnectionError','APITimeoutError')
         response=getattr(exc,'response',None); headers=response.headers if response is not None else {}
         delay=max(float(headers.get('retry-after-ms',0))/1000,reset_seconds(headers.get('retry-after')),min(120,2**job['attempts']))+random.uniform(0,2)
-        if (http==429 or (http==503 and code in ('server_is_overloaded','slow_down'))) and not quota and capacity: capacity.limited(delay)
+        if transient and not quota and capacity:
+            if http==429 or (http==503 and code in ('server_is_overloaded','slow_down')):capacity.limited(delay)
+            else:capacity.transient_failure(delay)
         if transient and not quota and job['attempts']<settings.max_attempts:
             status='retry_wait'
             with store.connect(write=True) as con:

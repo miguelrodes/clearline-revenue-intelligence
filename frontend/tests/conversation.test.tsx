@@ -35,3 +35,12 @@ it('uses a local scroll control for the prepared response instead of opening ano
  expect(await screen.findByRole('button',{name:'Review the prepared response below'})).toBeInTheDocument();
  expect(screen.queryByRole('link',{name:'Review the prepared response below'})).not.toBeInTheDocument();
 });
+
+
+it('does not offer nonexistent outreach for verification and no-action decisions',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>({...thread,status:'not_started',messages:[]})})));
+ render(<ConversationPanel id="verified-later" accountStatus="human_verification"/>);
+ expect(await screen.findByText(/No email is currently ready for approval/)).toBeInTheDocument();
+ expect(screen.queryByText(/Approve the prepared outreach below/)).not.toBeInTheDocument();
+ expect(screen.queryByText(/Ready to start/)).not.toBeInTheDocument();
+});
