@@ -130,3 +130,6 @@ thead,.work-section-title{background:#F7F9FC}th{color:#52657C}td{border-bottom-c
 .screening td{max-width:320px;vertical-align:top}.screening td small{display:block}.screening .table-scroll,.screening-detail .table-scroll{overflow-x:auto}
 .screening-detail h3{margin:1.5rem 0 .6rem}.screening-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem}
 .screening-detail dt{font-weight:600}.screening-detail dd{margin:0}.screening-detail pre{white-space:pre-wrap}.screening-detail details{margin:1rem 0}
+
+.screening-metrics .panel{margin:0}.screening table{table-layout:fixed}.screening th:nth-child(1){width:23%}.screening th:nth-child(2){width:16%}.screening th:nth-child(3){width:14%}.screening th:nth-child(4){width:16%}.screening th:nth-child(5){width:31%}
+.screening td,.screening th{white-space:normal;overflow-wrap:anywhere}.screening td .action-link{white-space:normal;text-align:left;justify-content:flex-start}.screening .page-heading .button-row{gap:20px}
