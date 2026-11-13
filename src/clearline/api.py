@@ -60,6 +60,16 @@ def create_app(settings=None):
         route:Literal['direct','distributor']
         evidence:str
         authorized:bool
+    class ContactClearanceInput(BaseModel):
+        task_id:str|None=None
+        contact_name:str=Field(default='',max_length=200)
+        recipient:str=Field(default='',max_length=320)
+        role:str=Field(default='',max_length=200)
+        phone:str=Field(default='',max_length=80)
+        route:Literal['','direct','distributor']=''
+        distributor:str=Field(default='',max_length=200)
+        verification_evidence:str=Field(default='',max_length=4000)
+        verified:bool=False
     class InvestigationResolution(BaseModel):
         resolution:str
     @app.get('/api/commercial-signals')
@@ -67,9 +77,12 @@ def create_app(settings=None):
     @app.get('/api/accounts/{oid}/commercial-work')
     def commercial_work(oid:str):
         service.account(oid)
-        return {'signals':service.commercial_signals(oid),'tasks':store.rows("SELECT * FROM investigation_tasks WHERE opportunity_id=? AND status='pending'",(oid,)), 'authorizations':store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(oid,))}
+        notes=store.rows('SELECT * FROM contact_clearance_notes WHERE opportunity_id=?',(oid,))
+        return {'signals':service.commercial_signals(oid),'tasks':store.rows("SELECT * FROM investigation_tasks WHERE opportunity_id=? AND status='pending'",(oid,)), 'authorizations':store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(oid,)), 'contact_clearance':notes[0] if notes else None}
     @app.post('/api/accounts/{oid}/contact-authorization')
     def authorize_contact(oid:str,body:AuthorizationInput):return service.authorize_contact(oid,**body.model_dump())
+    @app.post('/api/accounts/{oid}/contact-clearance')
+    def save_contact_clearance(oid:str,body:ContactClearanceInput):return service.save_contact_clearance(oid,**body.model_dump())
     @app.post('/api/investigations/{task_id}/resolve')
     def resolve_investigation(task_id:str,body:InvestigationResolution):return service.resolve_investigation(task_id,body.resolution)
 

@@ -47,12 +47,92 @@ class BusinessAccess:
             self.store.event('contact_authorization_recorded',{'recipient':recipient,'route':route,'evidence':evidence,'authorized':authorized},opportunity_id=oid,con=con)
         return {'job_id':self.store.queue_analysis(oid,investigation=True),'requires_reassessment':True}
 
+    def save_contact_clearance(self,oid,task_id=None,contact_name='',recipient='',role='',phone='',route='',distributor='',verification_evidence='',verified=False):
+        """Save partial contact facts without clearing the hold; complete verified facts authorize and reassess once."""
+        import re
+        from .store import utcnow
+        account=self.account(oid)
+        if account['workflow']!='recovery':raise ValueError('Recovery accounts only')
+        if not account['active']:raise ValueError('Inactive accounts cannot receive contact authorization')
+        values={k:str(v or '').strip() for k,v in {'contact_name':contact_name,'recipient':recipient,'role':role,'phone':phone,'route':route,'distributor':distributor,'verification_evidence':verification_evidence}.items()}
+        if values['route'] not in ('','direct','distributor'):raise ValueError('Choose direct, distributor, or leave the route unconfirmed')
+        if not any(values.values()):raise ValueError('Enter at least one contact detail or verification finding')
+        if values['recipient']:
+            if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',values['recipient']):raise ValueError('Enter a valid email address or leave it blank')
+            if values['recipient'].lower().endswith('.invalid'):raise ValueError('A simulator address does not establish contact eligibility')
+        task=None;task_is_contact=False
+        if task_id:
+            rows=self.store.rows("SELECT * FROM investigation_tasks WHERE id=? AND opportunity_id=? AND status='pending'",(task_id,oid))
+            if not rows:raise ValueError('This contact check is no longer pending. Refresh the account before saving.')
+            task=rows[0]
+            task_text=(task['title']+' '+task['reason']).casefold()
+            if not re.search(r'contact|recipient|authoriz|identity|match|mapping|route|relationship',task_text):
+                raise ValueError('This task is not a purchasing-contact or route check')
+            task_is_contact=bool(re.search(r'contact|recipient|authoriz|route|purchasing relationship',task_text)) and not bool(re.search(r'identity|match|mapping|alias',task_text))
+        if verified:
+            if not all((values['recipient'],values['role'],values['route'],values['verification_evidence'])):
+                raise ValueError('To verify the contact, provide a recipient, role, purchasing route, and how it was verified')
+            if not account['account_key'].startswith('DISTRIBUTOR|') and 'known_distributor_channel' in account['holds'] and values['route']!='distributor':
+                raise ValueError('Preserve the existing distributor route; direct authorization needs separately verified channel evidence')
+        now=utcnow();queue_reassessment=False;status='partial';task_status='pending' if task else None
+        with self.store.connect(write=True) as con:
+            prior=con.execute('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(oid,)).fetchone()
+            saved=con.execute('SELECT * FROM contact_clearance_notes WHERE opportunity_id=?',(oid,)).fetchone()
+            if task_id:
+                current_task=con.execute("SELECT id FROM investigation_tasks WHERE id=? AND opportunity_id=? AND status='pending'",(task_id,oid)).fetchone()
+                if not current_task:raise ValueError('This contact check was completed or changed before the save. Refresh the account and review the current task.')
+            effective_task_id=task_id if task_id else (saved['task_id'] if saved else None)
+            note_fields=('contact_name','recipient','role','phone','route','distributor','verification_evidence')
+            was_verified_note=bool(saved and saved['status']=='verified')
+            note_changed=not saved or any((saved[k] or '')!=values[k] for k in note_fields) or saved['task_id']!=effective_task_id
+            changed_authorized=False
+            if prior and prior['authorized']:
+                if saved:
+                    changed_authorized=any((saved[k] or '')!=values[k] for k in note_fields)
+                else:
+                    changed_authorized=any(values[k]!=prior[k] for k in ('recipient','role','route'))
+            authorization_changed=bool(not prior or not prior['authorized'] or any(prior[k]!=values[v] for k,v in [('recipient','recipient'),('role','role'),('route','route'),('evidence','verification_evidence')]))
+            if verified:
+                status='verified'
+                if authorization_changed:
+                    con.execute('INSERT INTO contact_authorizations VALUES(?,?,?,?,?,?,?) ON CONFLICT(opportunity_id) DO UPDATE SET recipient=excluded.recipient,role=excluded.role,route=excluded.route,evidence=excluded.evidence,authorized=1,updated_at=excluded.updated_at',(oid,values['recipient'],values['role'],values['route'],values['verification_evidence'],1,now))
+                    self.store.event('contact_authorization_recorded',{'recipient':values['recipient'],'role':values['role'],'route':values['route'],'evidence':values['verification_evidence'],'authorized':True},opportunity_id=oid,con=con)
+                if task and task_is_contact:
+                    refs=task['evidence_refs']
+                    resolution=f"Verified purchasing contact {values['contact_name'] or values['role']} at {values['recipient']} via {values['route']} route. Verification: {values['verification_evidence']}"
+                    con.execute('INSERT INTO investigation_resolutions VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET resolution=excluded.resolution,updated_at=excluded.updated_at',(task_id,oid,resolution,now))
+                    updated=con.execute("UPDATE investigation_tasks SET status='resolved' WHERE id=? AND status='pending'",(task_id,))
+                    if updated.rowcount!=1:raise ValueError('This contact check was completed before the save. Refresh the account and review the current task.')
+                    self.store.event('investigation_resolved',{'task_id':task_id,'resolution':resolution,'evidence_refs':refs},opportunity_id=oid,con=con)
+                    task_status='resolved'
+                queue_reassessment=authorization_changed or note_changed or bool(task and task_is_contact)
+            elif prior and prior['authorized'] and changed_authorized:
+                con.execute('UPDATE contact_authorizations SET authorized=0,updated_at=? WHERE opportunity_id=?',(now,oid))
+                self.store.event('contact_authorization_revoked',{'reason':'Contact details changed without renewed verification'},opportunity_id=oid,con=con)
+                queue_reassessment=True
+            elif was_verified_note and not note_changed:status='verified'
+            note_changed=note_changed or not saved or saved['status']!=status
+            if note_changed:
+                con.execute('''INSERT INTO contact_clearance_notes(opportunity_id,task_id,contact_name,recipient,role,phone,route,distributor,verification_evidence,status,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(opportunity_id) DO UPDATE SET task_id=excluded.task_id,contact_name=excluded.contact_name,recipient=excluded.recipient,role=excluded.role,phone=excluded.phone,route=excluded.route,distributor=excluded.distributor,verification_evidence=excluded.verification_evidence,status=excluded.status,updated_at=excluded.updated_at''',
+                    (oid,effective_task_id,values['contact_name'],values['recipient'],values['role'],values['phone'],values['route'],values['distributor'],values['verification_evidence'],status,now))
+                self.store.event('contact_clearance_saved',{'status':status,'task_id':task_id,'contact_name':values['contact_name'],'recipient':values['recipient'],'role':values['role'],'phone':values['phone'],'route':values['route'],'distributor':values['distributor'],'verification_evidence':values['verification_evidence']},opportunity_id=oid,con=con)
+            if verified and note_changed:queue_reassessment=True
+            if was_verified_note and status!='verified':queue_reassessment=True
+            authorized_now=True if verified else bool(prior and prior['authorized'] and not changed_authorized)
+        job_id=self.store.queue_analysis(oid,investigation=True) if queue_reassessment else None
+        return {'status':status,'task_status':task_status,'job_id':job_id,'requires_reassessment':queue_reassessment,'authorized':authorized_now}
+
     def resolve_investigation(self,task_id,resolution):
         from .store import utcnow
         if not resolution.strip():raise ValueError('Explain the verified finding; completion alone is not evidence')
         rows=self.store.rows("SELECT * FROM investigation_tasks WHERE id=? AND status='pending'",(task_id,))
         if not rows:raise ValueError('Pending investigation task not found')
         task=rows[0]
+        import re
+        if re.search(r'contact|recipient|authoriz|route|relationship',(task['title']+' '+task['reason']).casefold()):
+            auth=self.store.rows('SELECT 1 FROM contact_authorizations WHERE opportunity_id=? AND authorized=1',(task['opportunity_id'],))
+            if not auth:raise ValueError('Contact checks require a verified purchasing recipient and route. Use Contact Clearance; a note alone cannot clear this blocker.')
         with self.store.connect(write=True) as con:
             con.execute('INSERT INTO investigation_resolutions VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET resolution=excluded.resolution,updated_at=excluded.updated_at',(task_id,task['opportunity_id'],resolution,utcnow()))
             con.execute("UPDATE investigation_tasks SET status='resolved' WHERE id=?",(task_id,))

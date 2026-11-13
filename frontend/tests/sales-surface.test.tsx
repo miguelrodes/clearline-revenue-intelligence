@@ -132,6 +132,25 @@ it('blocks approval while selected revisions run and preserves review controls',
  expect(screen.getByText('Question 0 · Review or edit')).toBeInTheDocument();
 });
 
+it('opens Lone Tree contact evidence and saves a partial note directly in the clearance group',async()=>{
+ const contactGroup={id:'investigation:contacts',title:'Confirm purchasing contacts and buying routes',kind:'contacts',accounts:1,tasks:1,why:'Confirm the buyer before outreach.',button_label:'Review contact checks',rank:2,status:'needs_information',historical_decline_cents:5022500,members:[{id:'lone-tree',task_id:'contact-lone-tree',name:'ID DOC – Lone Tree',workflow:'recovery',decline_cents:5022500,recommended_action:'Identify and verify the current purchasing contact.'}]};
+ const account={id:'lone-tree',name:'ID DOC – Lone Tree',state:'ID',workflow:'recovery',status:'needs_contact',holds:[],evidence:{crm_notes:'Captain retired - new contact TBD.',last_purchase:'2026-07-16',last_contacted:'2025-05-05',prior_cents:100000,current_cents:50000},assessment:{created_at:'2026-11-12',details:{objective:'Reestablish purchasing relationship.',recommended_action:'Verify the current purchasing contact.'}},decline_cents:5022500,next_action:'Verify the current purchasing contact.',drafts:[],events:[],jobs:[],outbox:[],outcomes:[],trends:null};
+ const task={id:'contact-lone-tree',title:'Identify current purchasing contact',owner:'Sales',reason:'The CRM says the captain retired; the current buyer is not identified.',evidence_refs:'["crm_notes"]',blocking:1,status:'pending'};
+ const work={groups:[contactGroup],counts:{ready_messages:0,groups:1},checks:{priority_records:0,background_records:0}};
+ const clearance={tasks:[task],signals:{signals:[]},authorizations:[],contact_clearance:null};
+ const fetcher=vi.fn(async(path,options?:RequestInit)=>({ok:true,json:async()=>options?.method==='POST'?{status:'partial',task_status:'pending',authorized:false,requires_reassessment:false}:path==='/api/work'?work:path==='/api/opportunities'?[]:path==='/api/accounts/lone-tree'?account:path==='/api/accounts/lone-tree/commercial-work'?clearance:[]}));
+ vi.stubGlobal('fetch',fetcher);
+ render(<GroupReview id="investigation:contacts"/>);
+ fireEvent.click(await screen.findByRole('button',{name:'Review contact details'}));
+ expect(await screen.findByRole('heading',{name:'ID DOC – Lone Tree'})).toBeInTheDocument();
+ expect(screen.getByText('Captain retired - new contact TBD.')).toBeInTheDocument();
+ expect(screen.getByText(/The CRM says the captain retired/)).toBeInTheDocument();
+ fireEvent.change(screen.getByLabelText('Contact name'),{target:{value:'Purchasing office'}});
+ fireEvent.click(screen.getByRole('button',{name:'Save partial information'}));
+ await waitFor(()=>expect(fetcher.mock.calls.some(([path,options])=>path==='/api/accounts/lone-tree/contact-clearance'&&options?.method==='POST')).toBe(true));
+ expect(screen.getByRole('button',{name:'Close contact review'})).toBeInTheDocument();
+});
+
 it('keeps a reviewed soft-warning action and a pending human edit visible without reintroducing the old hold instruction',async()=>{
  const objective='Scope night-shift training alongside the existing order.';
  const account={id:'juniper',name:'Juniper Hills',workflow:'recovery',status:'awaiting_approval',holds:['open_orders_require_review'],decline_cents:3295700,evidence:{prior_cents:5426100,current_cents:2130400},assessment:{created_at:'2026-11-12',details:{engine_version:'recovery-4',decision:'pursue',objective,hypotheses:[],unresolved_questions:[],evidence_fields:[],rationale:'Full evidence and alternatives remain available.',recommended_action:'Review the training proposal; the order warning remains attached.'}},drafts:[{id:'edited',opportunity_id:'juniper',version:2,recipient:'simulation@example.invalid',subject:'Training discussion',body:'Could a training discussion help?',status:'awaiting_approval',created_at:'2026-11-12',can_edit:true,can_review:false,review_status:'queued'}],outbox:[],outcomes:[]};

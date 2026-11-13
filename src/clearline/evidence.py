@@ -23,6 +23,7 @@ def context_hash(con,oid):
         material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
     for table,fields in [('contact_authorizations','recipient,role,route,evidence,authorized,updated_at'),('investigation_resolutions','task_id,resolution,updated_at')]:
         material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
+    material['contact_clearance_notes']=[dict(r) for r in con.execute("SELECT task_id,contact_name,recipient,role,phone,route,distributor,verification_evidence,status,updated_at FROM contact_clearance_notes WHERE opportunity_id=? AND status='verified'",(oid,))]
     epoch=con.execute('SELECT value FROM controls WHERE name=?',('reassessment:'+oid,)).fetchone()
     material['reassessment_epoch']=epoch['value'] if epoch else None
     return digest(material)
@@ -74,6 +75,7 @@ class EvidenceAccess:
             'commercial_eligibility':__import__('clearline.commercial',fromlist=['eligibility']).eligibility(self.store,self.oid),
             'detected_signals':self.store.rows('SELECT * FROM commercial_signals WHERE opportunity_id=? AND active=1',(self.oid,)),
             'internal_resolutions':self.store.rows('SELECT * FROM investigation_resolutions WHERE opportunity_id=?',(self.oid,)),
+            'contact_clearance_notes':self.store.rows("SELECT * FROM contact_clearance_notes WHERE opportunity_id=? AND status='verified'",(self.oid,)),
             'application_policy':{'ref':'workflow_policy','kind':'application_configuration',
                 'followup_days':self.settings.followup_days,
                 'hard_hold_reasons':sorted(set(self.opp['holds'])-SOFT_HOLDS),
@@ -106,12 +108,16 @@ class EvidenceAccess:
         messages=self.store.rows('SELECT * FROM messages WHERE opportunity_id=? ORDER BY created_at,rowid',(self.oid,))
         for m in messages:m['ref']='message:'+m['id'];m['kind']='simulated_customer_statement' if m['direction']=='inbound' else 'approved_simulated_outbound'
         ctx=self.store.rows('SELECT * FROM customer_context WHERE opportunity_id=?',(self.oid,))
+        contact_clearance=self.store.rows("SELECT * FROM contact_clearance_notes WHERE opportunity_id=? AND status='verified'",(self.oid,))
+        contact_authorizations=self.store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(self.oid,))
         tasks=self.store.rows('SELECT * FROM commercial_tasks WHERE opportunity_id=?',(self.oid,))
         outcomes=self.store.rows('SELECT * FROM outcomes WHERE opportunity_id=? ORDER BY created_at,rowid',(self.oid,))
         for x in outcomes:x['ref']='outcome:'+x['id']
         return self.record(f'relationships:{offset}',{'ref':'relationship','crm':crm,'context':ctx,'messages':messages[offset:offset+100],
             'total_messages':len(messages),'next_offset':offset+100 if offset+100<len(messages) else None,'outcomes':outcomes,
-            'tasks':tasks,'investigation_tasks':self.store.rows("SELECT id,title,owner,reason,evidence_refs,blocking,status FROM investigation_tasks WHERE opportunity_id=?",(self.oid,)),'pending_jobs':self.store.rows("SELECT kind,due_at,status FROM jobs WHERE opportunity_id=? AND status IN ('queued','running')",(self.oid,))})
+            'tasks':tasks,'investigation_tasks':self.store.rows("SELECT id,title,owner,reason,evidence_refs,blocking,status FROM investigation_tasks WHERE opportunity_id=?",(self.oid,)),
+            'contact_clearance':contact_clearance,'contact_authorizations':contact_authorizations,
+            'pending_jobs':self.store.rows("SELECT kind,due_at,status FROM jobs WHERE opportunity_id=? AND status IN ('queued','running')",(self.oid,))})
     def identity(self):
         key=self.opp['account_key'];sig='|'.join(key.split('|')[1:]);related=[]
         for r in self.store.rows("SELECT id,account_key,name,state,evidence FROM opportunities WHERE workflow='recovery' AND active=1"):

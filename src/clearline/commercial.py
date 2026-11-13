@@ -16,6 +16,11 @@ CREATE INDEX IF NOT EXISTS commercial_signals_account ON commercial_signals(oppo
 CREATE TABLE IF NOT EXISTS contact_authorizations(
  opportunity_id TEXT PRIMARY KEY, recipient TEXT NOT NULL, role TEXT NOT NULL, route TEXT NOT NULL,
  evidence TEXT NOT NULL, authorized INTEGER NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS contact_clearance_notes(
+ opportunity_id TEXT PRIMARY KEY, task_id TEXT, contact_name TEXT NOT NULL DEFAULT '',
+ recipient TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
+ route TEXT NOT NULL DEFAULT '', distributor TEXT NOT NULL DEFAULT '',
+ verification_evidence TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'partial', updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS investigation_resolutions(
  task_id TEXT PRIMARY KEY, opportunity_id TEXT NOT NULL, resolution TEXT NOT NULL, updated_at TEXT NOT NULL);
 '''
