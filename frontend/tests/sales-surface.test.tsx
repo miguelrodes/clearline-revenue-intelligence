@@ -1,0 +1,145 @@
+import {it,expect,vi,beforeEach} from 'vitest';
+import {render,screen,fireEvent,waitFor,within} from '@testing-library/react';
+const state=vi.hoisted(()=>({path:'/',params:new URLSearchParams(),push:vi.fn(),replace:vi.fn()}));
+vi.mock('next/navigation',()=>({usePathname:()=>state.path,useSearchParams:()=>state.params,useRouter:()=>({push:state.push,replace:state.replace})}));
+import Workspace from '../src/components/workspace';
+import {GroupReview,OverviewPage,RecoveryPerformance,SalesActions,AccountSummary} from '../src/components/sales-surface';
+const keys=['inactivity','partial','product_decline','direct_gap_channel_review'];
+const overview={summary:{prior_cents:100000,current_cents:50000},counts:{},primary_declines:{},segments:keys.map((key,i)=>({key,accounts:i,decline_cents:i*10000})),trends:{rows:[]},last_scan:'2026-11-01'};
+const performance={simulated:{contacted:18,responded:0,purchased:0,net_cents:0,series:[]},verified:null,incremental_cents:null,outcomes:[],unlinked_outcomes:0,contacted_accounts:[],method:'Only simulated post-outreach outcomes are included.'};
+const group={id:'messages:inactivity',title:'Follow up with inactive customers',kind:'messages',accounts:2,tasks:2,why:'The emails are prepared. Choose which ones to approve.',button_label:'Review drafts',rank:1,status:'ready',historical_decline_cents:20000,members:[0,1].map(i=>({id:String(i),name:`Customer ${i}`,workflow:'recovery',strategy:'inactive',products:['CL-FS10'],decline_cents:10000,draft:{id:`draft-${i}`,opportunity_id:String(i),version:1,recipient:'simulation@example.invalid',subject:`Question ${i}`,body:`Personalized message ${i}`,status:'awaiting_approval',can_review:true,created_at:'2026-11-12',evidence_hash:'e',snapshot_hash:`hash-${i}`}}))};
+function setup(){vi.stubGlobal('fetch',vi.fn(async path=>({ok:true,json:async()=>String(path).startsWith('/api/work')?{groups:[group],counts:{ready_messages:2},checks:{priority_records:0,background_records:0}}:path==='/api/portfolio/coverage'?{total:2,assessed:2,failed:0,counts:{human_decision:2}}:path==='/api/overview'?overview:path==='/api/performance'?performance:path==='/api/health'?{alive:true,paused:false}:path==='/api/execution'?{active_investigations:[],queue_ready:0}:path==='/api/brief'?{brief:null,stale:false,job:null}:[]})))}
+beforeEach(()=>{vi.restoreAllMocks();state.path='/';state.params=new URLSearchParams();state.push.mockReset();setup()});
+it('has exactly two primary destinations and global account search',async()=>{
+ render(<Workspace/>);
+ const nav=screen.getByRole('navigation',{name:'Main navigation'});
+ expect(within(nav).getAllByRole('link').map(a=>a.textContent)).toEqual(['Overview','Action Center']);
+ expect(screen.getByRole('textbox',{name:'Search all accounts'})).toBeInTheDocument();
+ expect(await screen.findByRole('heading',{name:'Revenue overview'})).toBeInTheDocument();
+ expect(screen.queryByRole('heading',{name:'Needs your attention'})).not.toBeInTheDocument();
+ expect(screen.queryByRole('heading',{name:'Recent agent activity'})).not.toBeInTheDocument();
+});
+it('keeps identical four categories in both signal measurements including zero',async()=>{
+ render(<OverviewPage/>);await screen.findByRole('button',{name:'By revenue'});
+ const urls=()=>screen.getAllByRole('link').map(a=>a.getAttribute('href')).filter(x=>x?.startsWith('/?metric='));
+ const before=urls();fireEvent.click(screen.getByRole('button',{name:'By revenue'}));expect(urls()).toEqual(before);
+ expect(screen.getByRole('link',{name:'Direct purchase gap $300'})).toBeInTheDocument();
+ expect(screen.getByRole('link',{name:'Inactive customers $0'})).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'By accounts'}));expect(screen.getByRole('link',{name:'Direct purchase gap 3'})).toBeInTheDocument();
+});
+it('bulk approves only selected saved versions after explicit confirmation',async()=>{
+ render(<GroupReview id={group.id}/>);
+ fireEvent.click(await screen.findByRole('checkbox',{name:'Select Customer 1'}));
+ fireEvent.click(screen.getByRole('button',{name:'Approve 1 & simulate sending'}));
+ expect(vi.mocked(fetch).mock.calls.every(c=>c[1]?.method==='GET')).toBe(true);
+ fireEvent.click(screen.getByRole('button',{name:'Confirm simulated sending'}));
+ await waitFor(()=>expect(vi.mocked(fetch).mock.calls.some(c=>c[1]?.method==='POST')).toBe(true));
+ const call=vi.mocked(fetch).mock.calls.find(c=>c[1]?.method==='POST')!;
+ expect(call[0]).toBe('/api/work/messages%3Ainactivity/decision');
+ expect(JSON.parse(call[1]?.body as string)).toEqual({approve:true,snapshots:[{draft_id:'draft-0',snapshot_hash:'hash-0'}]});
+});
+it('disables batch approval when selected messages have unsaved edits',async()=>{
+ render(<GroupReview id={group.id}/>);await screen.findByRole('checkbox',{name:'Select Customer 0'});
+ fireEvent.click(screen.getByText('Question 0 · Review or edit'));
+ fireEvent.change(screen.getAllByLabelText('Subject')[0],{target:{value:'Edited subject'}});
+ expect(screen.getByRole('button',{name:'Approve 2 & simulate sending'})).toBeDisabled();
+ expect(screen.getByText('Edits save automatically. Approval is available once saving finishes.')).toBeInTheDocument();
+});
+it('separates simulated outcomes from verified revenue and incremental claims',async()=>{
+ render(<RecoveryPerformance/>);
+ expect(await screen.findByText(/No verified commercial results yet/)).toBeInTheDocument();
+ expect(screen.queryByText('18')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'Simulated results'}));expect(screen.getByText('18')).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'How it is measured'}));expect(screen.getByText('Estimated incremental recovery: unavailable.')).toBeInTheDocument();
+});
+it('keeps prepared work readable with product and status grouping',async()=>{
+ render(<SalesActions/>);
+ expect(await screen.findByRole('link',{name:'Review drafts →'})).toHaveAttribute('href','/actions?group=messages%3Ainactivity');
+ fireEvent.change(screen.getByRole('combobox',{name:'Group actions by'}),{target:{value:'product'}});
+ expect(screen.getByRole('heading',{name:'CL-FS10'})).toBeInTheDocument();
+ expect(screen.getByText(/An email may concern several products/)).toBeInTheDocument();
+});
+
+it('opens customer evidence over the current group before Next Link handles navigation',async()=>{
+ state.params=new URLSearchParams({group:group.id});
+ render(<Workspace/>);
+ fireEvent.click(await screen.findByRole('checkbox',{name:'Select Customer 1'}));
+ fireEvent.click(screen.getByText('Question 0 · Review or edit'));
+ const link=screen.getAllByRole('link',{name:'View customer'})[0];
+ // Next Link handles ordinary clicks by preventing native navigation.
+ link.addEventListener('click',e=>e.preventDefault());
+ fireEvent.click(link);
+ expect(state.push).toHaveBeenCalledWith('/?group=messages%3Ainactivity&account=0');
+ expect(screen.getByRole('button',{name:'Approve 1 & simulate sending'})).toBeEnabled();
+});
+
+it('presents a short practical next step while retaining the detailed agent assessment',async()=>{
+ const account={id:'juniper',name:'Juniper Hills',workflow:'recovery',status:'agent_held',holds:['open_orders_require_review'],decline_cents:3295700,evidence:{prior_cents:5426100,current_cents:2130400,last_purchase:'2026-07-16',crm_notes:'Wants training for night shift'},assessment:{created_at:'2026-11-12',details:{decision:'hold',hypotheses:[],unresolved_questions:[],evidence_fields:[],rationale:'The account has an explicit open_orders_require_review hold. Test purchases fell across both products.',recommended_action:'Assign the owner to reconcile all source rows and aliases before reopening outreach.'}},drafts:[],outbox:[],outcomes:[]};
+ vi.stubGlobal('fetch',vi.fn(async(url)=>({ok:true,json:async()=>String(url).endsWith('/conversation')?{status:'not_started',messages:[],context:{outreach_policy:'normal',contact:null,channel:null},tasks:[]}:account})));
+ render(<AccountSummary id="juniper"/>);
+ expect(await screen.findByText('The account has pending orders that need checking. Test purchases fell across both products.')).toBeInTheDocument();
+ expect(screen.getByText(/Confirm whether the order was fulfilled, canceled, or is still pending/)).toBeInTheDocument();
+ expect(screen.getByText('Inspect the full assessment and evidence')).toBeInTheDocument();
+ expect(screen.getByRole('link',{name:'Review the prepared information request'})).toHaveAttribute('href','/actions?group=check:orders');
+});
+
+it('limits signal bulk approval to matching customers even when a campaign spans signals',async()=>{
+ const original=vi.mocked(fetch).getMockImplementation()!;
+ vi.mocked(fetch).mockImplementation(async(path,opts)=>path==='/api/opportunities'?{ok:true,json:async()=>[{id:'0',signals:['inactivity'],partial_decline:false},{id:'1',signals:['product_decline'],partial_decline:false}]} as Response:original(path,opts));
+ render(<GroupReview id={group.id} signal="inactivity"/>);
+ await screen.findByRole('checkbox',{name:'Select Customer 0'});
+ await waitFor(()=>expect(screen.queryByRole('checkbox',{name:'Select Customer 1'})).not.toBeInTheDocument());
+ fireEvent.click(screen.getByRole('button',{name:'Approve 1 & simulate sending'}));
+ fireEvent.click(screen.getByRole('button',{name:'Confirm simulated sending'}));
+ await waitFor(()=>expect(vi.mocked(fetch).mock.calls.some(c=>c[1]?.method==='POST')).toBe(true));
+ const call=vi.mocked(fetch).mock.calls.find(c=>c[1]?.method==='POST')!;
+ expect(JSON.parse(call[1]?.body as string).snapshots).toEqual([{draft_id:'draft-0',snapshot_hash:'hash-0'}]);
+});
+
+it('uses the requested search placeholder and distinguishes real prospects from fictional customers',async()=>{
+ const original=vi.mocked(fetch).getMockImplementation()!;
+ vi.mocked(fetch).mockImplementation(async(path,opts)=>String(path).startsWith('/api/search?')?{ok:true,json:async()=>[{id:'real',name:'Pennsylvania DOC',state:'PA',workflow:'prospecting'},{id:'case',name:'Pennsylvania Case Account',state:'PA',workflow:'recovery'}]} as Response:original(path,opts));
+ render(<Workspace/>);
+ fireEvent.change(screen.getByPlaceholderText('Find a customer, prospect, or account...'),{target:{value:'Pennsylvania'}});
+ expect(await screen.findByText('PA · Real SwabTek prospect')).toBeInTheDocument();
+ expect(screen.getByText('PA · Clearline case-study account')).toBeInTheDocument();
+});
+
+it('uses a lightweight summary and sends guidance only for selected exact drafts',async()=>{
+ const original=vi.mocked(fetch).getMockImplementation()!;
+ vi.mocked(fetch).mockImplementation(async(path,opts)=>String(path).endsWith('/revise')?{ok:true,json:async()=>({count:1,job_ids:['revision-1']})} as Response:original(path,opts));
+ const {container}=render(<GroupReview id={group.id}/>);
+ fireEvent.click(await screen.findByRole('checkbox',{name:'Select Customer 1'}));
+ expect(screen.getAllByText(group.why)).toHaveLength(1);
+ expect(container.querySelector('.review-summary')).toBeNull();
+ expect(container.querySelector('.outreach-summary li')).toHaveTextContent('2 personalized emails prepared');
+ fireEvent.click(screen.getByText('Want to adjust the approach? Add instructions for the agents before approving.'));
+ fireEvent.change(screen.getByLabelText('Instructions for selected emails'),{target:{value:'Emphasize replenishment and offer a quote'}});
+ expect(screen.getByRole('button',{name:'Approve 1 & simulate sending'})).toBeDisabled();
+ fireEvent.click(screen.getByRole('button',{name:'Revise 1 selected emails'}));
+ await waitFor(()=>expect(vi.mocked(fetch).mock.calls.some(c=>String(c[0]).endsWith('/revise'))).toBe(true));
+ const call=vi.mocked(fetch).mock.calls.find(c=>String(c[0]).endsWith('/revise'))!;
+ expect(JSON.parse(call[1]?.body as string)).toEqual({instructions:'Emphasize replenishment and offer a quote',snapshots:[{draft_id:'draft-0',snapshot_hash:'hash-0'}]});
+ expect(vi.mocked(fetch).mock.calls.some(c=>String(c[0]).endsWith('/decision'))).toBe(false);
+});
+
+it('blocks approval while selected revisions run and preserves review controls',async()=>{
+ const revised={...group,members:group.members.map(m=>({...m,revision:{id:'job-'+m.id,status:'running'}}))};
+ vi.stubGlobal('fetch',vi.fn(async path=>({ok:true,json:async()=>String(path).startsWith('/api/work')?{groups:[revised]}:[]})));
+ render(<GroupReview id={group.id}/>);
+ expect(await screen.findByRole('button',{name:'Approve 2 & simulate sending'})).toBeDisabled();
+ expect(screen.getAllByText('Agent reviewing this email…')).toHaveLength(2);
+ expect(screen.getByText('Question 0 · Review or edit')).toBeInTheDocument();
+});
+
+it('keeps a reviewed soft-warning action and a pending human edit visible without reintroducing the old hold instruction',async()=>{
+ const objective='Scope night-shift training alongside the existing order.';
+ const account={id:'juniper',name:'Juniper Hills',workflow:'recovery',status:'awaiting_approval',holds:['open_orders_require_review'],decline_cents:3295700,evidence:{prior_cents:5426100,current_cents:2130400},assessment:{created_at:'2026-11-12',details:{engine_version:'recovery-4',decision:'pursue',objective,hypotheses:[],unresolved_questions:[],evidence_fields:[],rationale:'Full evidence and alternatives remain available.',recommended_action:'Review the training proposal; the order warning remains attached.'}},drafts:[{id:'edited',opportunity_id:'juniper',version:2,recipient:'simulation@example.invalid',subject:'Training discussion',body:'Could a training discussion help?',status:'awaiting_approval',created_at:'2026-11-12',can_edit:true,can_review:false,review_status:'queued'}],outbox:[],outcomes:[]};
+ vi.stubGlobal('fetch',vi.fn(async(url)=>({ok:true,json:async()=>String(url).endsWith('/conversation')?{status:'not_started',messages:[],context:{outreach_policy:'normal',contact:null,channel:null},tasks:[]}:account})));
+ render(<AccountSummary id="juniper"/>);
+ expect((await screen.findAllByText(objective)).length).toBeGreaterThan(0);
+ expect(screen.getByRole('textbox',{name:'Message'})).toHaveValue('Could a training discussion help?');
+ expect(screen.getByText('The agent is checking your edited email. Approval will be available after review.')).toBeInTheDocument();
+ expect(screen.queryByRole('button',{name:'Approve simulated send'})).not.toBeInTheDocument();
+ expect(screen.queryByRole('link',{name:'Review the prepared information request'})).not.toBeInTheDocument();
+});

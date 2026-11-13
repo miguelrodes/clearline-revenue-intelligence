@@ -39,3 +39,7 @@ def draft(store,opportunity,decision):
     job = store.claim()
     store.save_analysis(job,decision)
     return store.rows("SELECT * FROM drafts")[0]
+
+@pytest.fixture
+def reply_decision():
+    return {'decision':'pursue','intent':'training','opportunity_status':'support_needed','facts':[], 'products':[], 'contact':None,'channel':None,'uncertainties':[], 'rationale':'The customer needs training.','recommended_action':'Ask which shift needs support.','subject':'Training question','body':'Which shift needs support?'}

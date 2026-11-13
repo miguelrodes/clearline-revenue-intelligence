@@ -1,0 +1,31 @@
+import {act,renderHook} from '@testing-library/react';
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
+import {useDraftAutosave} from '../src/lib/use-draft-autosave';
+import {request} from '../src/lib/api';
+import type {Draft} from '../src/lib/types';
+vi.mock('../src/lib/api',()=>({request:vi.fn(),refresh:vi.fn()}));
+const draft:Draft={id:'old',opportunity_id:'account',version:1,evidence_hash:'hash',recipient:'simulation@example.invalid',subject:'Subject',body:'Original',status:'awaiting_approval',can_review:true,created_at:''};
+beforeEach(()=>{vi.useFakeTimers();vi.mocked(request).mockReset()});
+afterEach(()=>{vi.useRealTimers()});
+it('debounces edits, blocks approval until refreshed version arrives, and does not resave stale IDs',async()=>{
+ vi.mocked(request).mockResolvedValue({draft_id:'new'});
+ const {result,rerender}=renderHook(({d})=>useDraftAutosave(d),{initialProps:{d:draft}});
+ act(()=>result.current.setFields({...result.current.fields,body:'First edit'}));
+ await act(async()=>{vi.advanceTimersByTime(400)});
+ act(()=>result.current.setFields({...result.current.fields,body:'Final edit'}));
+ await act(async()=>{vi.advanceTimersByTime(650)});
+ expect(request).toHaveBeenCalledTimes(1);expect(request).toHaveBeenCalledWith('/drafts/old','PATCH',expect.objectContaining({body:'Final edit',version:1}));
+ expect(result.current.pending).toBe(true);
+ await act(async()=>{vi.advanceTimersByTime(5000)});expect(request).toHaveBeenCalledTimes(1);
+ rerender({d:{...draft,id:'new',version:2,body:'Final edit'}});
+ expect(result.current.pending).toBe(false);expect(result.current.status).toBe('Saved');
+});
+it('retains failed edits and blocks approval until retry succeeds',async()=>{
+ vi.mocked(request).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce({draft_id:'new'});
+ const {result}=renderHook(()=>useDraftAutosave(draft));
+ act(()=>result.current.setFields({...result.current.fields,body:'Keep this edit'}));
+ await act(async()=>{vi.advanceTimersByTime(650)});
+ expect(result.current.error).toBe('Offline');expect(result.current.fields.body).toBe('Keep this edit');expect(result.current.pending).toBe(true);
+ await act(async()=>{vi.advanceTimersByTime(5000)});expect(request).toHaveBeenCalledTimes(1);
+ act(()=>result.current.retry());await act(async()=>{vi.advanceTimersByTime(650)});expect(request).toHaveBeenCalledTimes(2);
+});

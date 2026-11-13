@@ -165,11 +165,20 @@ def test_both_workflows_render_with_independent_approval_controls(store,settings
     with store.connect(write=True) as con: con.execute("DELETE FROM scans")
     app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/"app.py")).run(timeout=20)
     assert not app.exception
-    assert len([b for b in app.button if b.label=="Approve for simulated outbox"])==2
+    assert len([b for b in app.button if b.label=="Approve for simulated outbox"])==1
     assert len(next(s for s in app.selectbox if s.label=="Account").options)==1
+    assert not [s for s in app.selectbox if s.label=="Real prospect"]
+    app.switch_page("views/prospecting.py").run()
+    assert not app.exception
+    assert app.title[0].value == "Prospecting Agent"
+    assert len([b for b in app.button if b.label=="Approve for simulated outbox"])==1
+    assert not [s for s in app.selectbox if s.label=="Account"]
     assert len(next(s for s in app.selectbox if s.label=="Real prospect").options)==2
     [t for t in app.text_input if t.label=="Subject"][-1].set_value("Unsaved prospect edit")
     [b for b in app.button if b.label=="Approve for simulated outbox"][-1].click().run()
     assert not app.exception
     assert any("Save your edits first" in e.value for e in app.error)
     assert not store.rows("SELECT * FROM approvals")
+    app.switch_page("views/recovery.py").run()
+    assert app.title[0].value == "Customer Recovery Agent"
+    assert next(t for t in app.text_input if t.label=="Subject").value == draft["subject"]

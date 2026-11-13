@@ -220,7 +220,8 @@ async def research_prospect(store, job, settings):
     if opp["workflow"] != "prospecting":
         raise ValueError("Public research must never receive fictional recovery identities")
     profile = opp["evidence"]["profile"]
-    async with AsyncOpenAI(timeout=settings.timeout_seconds, max_retries=0) as client:
+    from .telemetry import client_for
+    async with client_for(store,job,settings) as client:
         agent = Agent(name="SwabTek Public Research Agent", instructions=RESEARCH_INSTRUCTIONS,
             model=OpenAIResponsesModel(model=settings.model, openai_client=client),
             tools=[WebSearchTool(search_context_size="low", filters={"allowed_domains": profile["allowed_domains"]})],
@@ -264,7 +265,8 @@ async def qualify_prospect(store, job, settings):
             "outbox": store.rows("SELECT subject,body,delivery_mode,created_at FROM outbox WHERE opportunity_id=?", (opp["id"],)),
             "outcomes": store.rows("SELECT kind,note,provenance FROM outcomes WHERE opportunity_id=?", (opp["id"],))})
 
-    async with AsyncOpenAI(timeout=settings.timeout_seconds, max_retries=0) as client:
+    from .telemetry import client_for
+    async with client_for(store,job,settings) as client:
         agent = Agent(name="SwabTek Prospect Qualification Agent", instructions=QUALIFY_INSTRUCTIONS,
             model=OpenAIResponsesModel(model=settings.model, openai_client=client),
             tools=[get_prospect_evidence], output_type=Qualification,

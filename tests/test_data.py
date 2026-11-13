@@ -106,3 +106,35 @@ def test_unattended_scan_runs_in_separate_worker_process(data_dir,tmp_path):
     finally:
         process.terminate()
         process.wait(timeout=5)
+
+
+@pytest.mark.parametrize('changed_source',['orders','crm_accounts','public_agencies','products'])
+def test_relevant_source_details_invalidate_assessment_without_changing_finances(data_dir,changed_source):
+    write_csv(data_dir,'orders',PRIOR)
+    before,items=scan(data_dir,include_all=True)
+    with (data_dir/(changed_source+'.csv')).open(newline='') as f:rows=list(csv.DictReader(f))
+    field,value={'orders':('order_id','REVISED-REFERENCE'),'crm_accounts':('notes','Night shift asks for training'),
+                 'public_agencies':('city','Corrected City'),'products':('name','Corrected product name')}[changed_source]
+    rows[0][field]=value;write_csv(data_dir,changed_source,rows)
+    after,updated=scan(data_dir,include_all=True)
+    assert updated[0]['id']==items[0]['id']
+    assert updated[0]['evidence_hash']!=items[0]['evidence_hash']
+    for key in ('prior_cents','current_cents','prior_tests','current_tests','net_cents_whole_export','duplicate_excess_retained'):
+        assert before[key]==after[key]
+
+
+def test_evidence_tools_retrieve_all_ambiguous_crm_and_public_records(data_dir,settings,store):
+    from dataclasses import replace
+    import json
+    from clearline.evidence import EvidenceAccess
+    write_csv(data_dir,'orders',PRIOR)
+    with (data_dir/'crm_accounts.csv').open(newline='') as f:rows=list(csv.DictReader(f))
+    rows.append({**rows[0],'crm_id':'second','notes':'Training question'})
+    write_csv(data_dir,'crm_accounts',rows)
+    summary,items=scan(data_dir,include_all=True);store.save_scan(summary,items)
+    oid=items[0]['id'];store.queue_analysis(oid,investigation=True);job=store.claim()
+    access=EvidenceAccess(store,job,replace(settings,data_dir=data_dir))
+    relationships=json.loads(access.relationships());identity=json.loads(access.identity())
+    assert {x['crm_id'] for x in relationships['crm']}=={'test','second'}
+    assert identity['public_matches'][0]['agency_name']=='Example County Jail'
+    assert 'ambiguous_identity' in store.opportunity(oid)['holds']

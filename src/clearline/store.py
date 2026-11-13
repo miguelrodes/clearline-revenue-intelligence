@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS outcomes(
  note TEXT NOT NULL, provenance TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events(
  id INTEGER PRIMARY KEY, job_id TEXT, opportunity_id TEXT, kind TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS events_kind_job ON events(kind,job_id);
+CREATE INDEX IF NOT EXISTS events_account_kind ON events(opportunity_id,kind,id);
 CREATE TABLE IF NOT EXISTS controls(name TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS worker_state(id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL, seen_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS prospect_research(
@@ -66,6 +68,8 @@ class Store:
         with self.connect() as con:
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript(SCHEMA)
+            from .operations import SCHEMA as OPERATIONS_SCHEMA
+            con.executescript(OPERATIONS_SCHEMA)
             opportunity_columns = {r["name"] for r in con.execute("PRAGMA table_info(opportunities)")}
             if "workflow" not in opportunity_columns:
                 con.execute("ALTER TABLE opportunities ADD COLUMN workflow TEXT NOT NULL DEFAULT 'recovery'")
@@ -75,6 +79,13 @@ class Store:
             if "reference" not in columns:
                 con.execute("ALTER TABLE outcomes ADD COLUMN reference TEXT")
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS outcome_reference ON outcomes(opportunity_id,kind,reference) WHERE reference IS NOT NULL")
+
+            from .conversations import migrate
+            migrate(con)
+            from .service_access import SCHEMA as ACCESS_SCHEMA
+            con.executescript(ACCESS_SCHEMA)
+            from .evidence import SCHEMA as EVIDENCE_SCHEMA
+            con.executescript(EVIDENCE_SCHEMA)
 
     def heartbeat(self, state):
         with self.connect(write=True) as con:
@@ -142,15 +153,17 @@ class Store:
         with self.connect(write=True) as con:
             return self._enqueue(con, kind, payload, oid, key, due)
 
-    def queue_analysis(self, oid, followup_of=None):
+    def queue_analysis(self, oid, followup_of=None, investigation=False, allow_simulation=False):
         opp = self.opportunity(oid)
-        if opp["holds"] or not opp["active"] or opp["status"] in STOPPED_STATUSES:
+        if not opp["active"] or (not investigation and (opp["holds"] or opp["status"] in STOPPED_STATUSES)):
             raise ValueError("This opportunity is held, inactive, or already stopped")
-        payload = {"evidence_hash": opp["evidence_hash"], "followup_of": followup_of}
+        from .evidence import context_hash,ENGINE_VERSION
+        with self.connect() as con: revision=context_hash(con,oid)
+        payload = {"context_hash":revision,"engine_version":ENGINE_VERSION,"evidence_hash": opp["evidence_hash"], "followup_of": followup_of, "portfolio": investigation, "allow_simulation": allow_simulation}
         kind = "prospect_qualify" if opp["workflow"] == "prospecting" else "analyze"
         if kind == "prospect_qualify" and not opp["evidence"].get("research"):
             return self.queue_prospect(oid)
-        key = f"{kind}:{oid}:{opp['evidence_hash']}:{followup_of or 'initial'}"
+        key = f"{kind}:{oid}:{revision}:{ENGINE_VERSION}:{followup_of or 'initial'}"
         return self.enqueue(kind, payload, oid, key)
 
     def add_prospect(self, profile, as_of):
@@ -209,13 +222,17 @@ class Store:
                      o["evidence_hash"],json.dumps(o["holds"]),"needs_review",utcnow()))
             self.event("scan_completed", summary, con=con)
 
-    def claim(self):
+    def claim(self, kinds=None):
         with self.connect(write=True) as con:
-            row = con.execute("SELECT * FROM jobs WHERE status='queued' AND due_at<=? ORDER BY due_at,created_at LIMIT 1", (utcnow(),)).fetchone()
+            where = " AND j.kind IN ("+",".join("?" for _ in kinds)+")" if kinds else ""
+            row = con.execute("""SELECT j.* FROM jobs j WHERE j.status='queued' AND j.due_at<=?
+                AND NOT EXISTS (SELECT 1 FROM jobs active WHERE active.status='running' AND
+                  (active.kind='scan' OR j.kind='scan' OR (j.opportunity_id IS NOT NULL AND active.opportunity_id=j.opportunity_id)))""" + where + " ORDER BY CASE j.kind WHEN 'deliver' THEN 0 WHEN 'revenue_brief' THEN 1 WHEN 'followup' THEN 2 WHEN 'prepare' THEN 3 ELSE 4 END,j.due_at,j.created_at,j.rowid LIMIT 1", (utcnow(),*(kinds or []))).fetchone()
             if row is None: return None
             con.execute("UPDATE jobs SET status='running',started_at=?,attempts=attempts+1,error=NULL WHERE id=?", (utcnow(),row["id"]))
             job = dict(row)
             job["payload"] = json.loads(job["payload"])
+            job["attempts"] += 1
             return job
 
     def finish(self, jid, status="completed", error=None):
@@ -232,11 +249,15 @@ class Store:
 
     def retry(self, jid):
         with self.connect(write=True) as con:
+            job=con.execute('SELECT status FROM jobs WHERE id=?',(jid,)).fetchone()
+            if job and job['status']=='blocked_config' and con.execute("SELECT 1 FROM controls WHERE name='api_blocked'").fetchone():
+                con.execute("DELETE FROM controls WHERE name='api_blocked'")
+                con.execute("UPDATE jobs SET status='queued',due_at=?,error=NULL WHERE status='blocked_config' AND kind IN ('analyze','prepare','reply','revise_draft','revenue_brief','prospect_research','prospect_qualify')",(utcnow(),))
             con.execute("UPDATE jobs SET status='queued',due_at=?,error=NULL WHERE id=? AND status IN ('failed','blocked_config')", (utcnow(),jid))
 
-    def schedule(self, interval_seconds=86400, enabled=True, analysis_limit=1, policy=None):
+    def schedule(self, interval_seconds=86400, enabled=True, analysis_limit=-1, policy=None):
         if interval_seconds < 1: raise ValueError("Interval must be positive")
-        if analysis_limit not in range(4): raise ValueError("Analysis limit must be between zero and three")
+        if analysis_limit < -1: raise ValueError("Use -1 for all accounts, 0 for scan only, or a positive limit")
         with self.connect(write=True) as con:
             con.execute("""INSERT INTO schedules VALUES('recovery_scan',?,?,?,?)
                 ON CONFLICT(name) DO UPDATE SET interval_seconds=excluded.interval_seconds,
@@ -254,14 +275,54 @@ class Store:
 
     def save_analysis(self, job, result):
         """One transaction saves the result and completes the job, including rejection/hold."""
+        if job["kind"] == "reply":
+            from .conversations import save_reply
+            return save_reply(self,job,result)
         with self.connect(write=True) as con:
             opp = con.execute("SELECT * FROM opportunities WHERE id=?", (job["opportunity_id"],)).fetchone()
             current_job = con.execute("SELECT status FROM jobs WHERE id=?", (job["id"],)).fetchone()
-            if not current_job or current_job["status"] != "running" or not opp or not opp["active"] or json.loads(opp["holds"]) or opp["evidence_hash"] != job["payload"]["evidence_hash"] or opp["status"] in STOPPED_STATUSES:
-                con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE id=?", (utcnow(),job["id"]))
+            if not current_job or current_job["status"] != "running" or not opp or not opp["active"] or opp["evidence_hash"] != job["payload"]["evidence_hash"] or (not job["payload"].get("portfolio") and opp["status"] in STOPPED_STATUSES):
+                con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE id=? AND status='running'", (utcnow(),job["id"]))
                 return
+            from .service_access import regeneration_current
+            if not regeneration_current(self,con,job):
+                con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE id=?",(utcnow(),job['id']));return
             analysis = result.model_dump(mode="json") if hasattr(result,"model_dump") else result
+            from .evidence import context_hash,ENGINE_VERSION
+            if analysis.get('engine_version')==ENGINE_VERSION and analysis.get('context_hash')!=context_hash(con,opp['id']):
+                con.execute("UPDATE jobs SET status='cancelled',finished_at=?,error='Account context changed during investigation' WHERE id=?",(utcnow(),job['id']))
+                return
+            analysis["evidence_hash"] = opp["evidence_hash"]
+            analysis["outreach_kind"] = "followup" if job["payload"].get("followup_of") else "initial"
+            from .conversations import policy
+            from .action_policy import permitted
+            if analysis['decision']=='pursue' and not permitted(opp,analysis,policy(con,opp['id'])):
+                if analysis.get('engine_version')==ENGINE_VERSION:
+                    raise ValueError('Reviewed action violates execution boundaries; no draft saved')
+                analysis.update(decision='hold',subject='',body='')
+            con.execute("UPDATE investigation_tasks SET status='superseded' WHERE opportunity_id=? AND status='pending'",(opp['id'],))
+            for task in analysis.get('verification_tasks',[]):
+                tid=digest([opp['id'],analysis.get('context_hash'),task])
+                con.execute('INSERT OR REPLACE INTO investigation_tasks VALUES(?,?,?,?,?,?,?,?,?,?)',
+                    (tid,opp['id'],analysis.get('context_hash',''),task['title'],task['owner'],task['reason'],json.dumps(task['evidence_refs']),int(task['blocking']),'pending',utcnow()))
             self.event("agent_decision",analysis,job["id"],opp["id"],con=con)
+            if analysis.get('engine_version')==ENGINE_VERSION:
+                obsolete=con.execute("SELECT id FROM jobs WHERE opportunity_id=? AND id!=? AND kind='analyze' AND status IN ('failed','blocked_config') AND json_extract(payload,'$.followup_of') IS NULL AND (COALESCE(json_extract(payload,'$.context_hash'),'')!=? OR COALESCE(json_extract(payload,'$.engine_version'),'')!=?)",(opp['id'],job['id'],analysis.get('context_hash'),ENGINE_VERSION)).fetchall()
+                for previous in obsolete:
+                    con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE id=?",(utcnow(),previous['id']))
+                    self.event('investigation_failure_superseded',{'previous_job':previous['id'],'replacement_job':job['id'],'reason':'A current reviewed assessment supersedes the failed older context.'},job['id'],opp['id'],con=con)
+            preserve = opp["status"] in STOPPED_STATUSES or opp["status"] in ("approved","awaiting_response")
+            contact_ready = not job["payload"].get("portfolio") or job["payload"].get("allow_simulation") or analysis.get("engine_version")==ENGINE_VERSION
+            parent=job['payload'].get('followup_of')
+            latest_send=con.execute('SELECT draft_id FROM outbox WHERE opportunity_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',(opp['id'],)).fetchone() if parent else None
+            valid_followup=bool(parent and latest_send and latest_send['draft_id']==parent and opp['status']=='awaiting_response')
+            if preserve and not valid_followup:
+                con.execute("UPDATE jobs SET status='completed',finished_at=? WHERE id=?",(utcnow(),job["id"]))
+                return
+            if analysis["decision"] == "pursue" and not contact_ready:
+                con.execute("UPDATE opportunities SET status='needs_contact',updated_at=? WHERE id=?",(utcnow(),opp["id"]))
+                con.execute("UPDATE jobs SET status='completed',finished_at=? WHERE id=?",(utcnow(),job["id"]))
+                return
             if analysis["decision"] == "pursue":
                 version = con.execute("SELECT COALESCE(MAX(version),0)+1 FROM drafts WHERE opportunity_id=?",(opp["id"],)).fetchone()[0]
                 con.execute("UPDATE drafts SET status='superseded' WHERE opportunity_id=? AND status IN ('awaiting_approval','approved')",(opp["id"],))
@@ -270,7 +331,8 @@ class Store:
                              analysis["subject"],analysis["body"],"awaiting_approval",json.dumps(analysis),utcnow()))
                 state = "awaiting_approval"
             else:
-                state = "agent_held" if analysis["decision"] == "hold" else "rejected"
+                con.execute("UPDATE drafts SET status='superseded' WHERE opportunity_id=? AND status='awaiting_approval'",(opp['id'],))
+                state = "agent_held" if analysis["decision"] == "hold" else "no_action" if analysis["decision"] == "no_action" else "rejected"
             con.execute("UPDATE opportunities SET status=?,updated_at=? WHERE id=?",(state,utcnow(),opp["id"]))
             con.execute("UPDATE jobs SET status='completed',finished_at=? WHERE id=?",(utcnow(),job["id"]))
 
@@ -290,24 +352,51 @@ class Store:
             con.execute("INSERT INTO drafts VALUES(?,?,?,?,?,?,?,?,?,?)",(new_id,d["opportunity_id"],version,d["evidence_hash"],recipient,subject,body,"awaiting_approval",d["analysis"],utcnow()))
             con.execute("UPDATE opportunities SET status='awaiting_approval' WHERE id=?",(d["opportunity_id"],))
             self.event("draft_revised",{"old_id":did,"new_id":new_id},opportunity_id=d["opportunity_id"],con=con)
+            # A changed narrow-scope email needs fresh QA, not a new initial investigation.
+            # Debounce autosaves and preserve the human's exact text throughout review.
+            from .reporting import valid_draft
+            from .draft_revision import manual_reviewable
+            edited=dict(con.execute('SELECT * FROM drafts WHERE id=?',(new_id,)).fetchone())
+            if not valid_draft(self,edited) and manual_reviewable(self,edited):
+                con.execute("UPDATE jobs SET status='cancelled',finished_at=?,error=? WHERE opportunity_id=? AND kind='revise_draft' AND status IN ('queued','running','blocked_config')",(utcnow(),'A newer human edit superseded this review.',d['opportunity_id']))
+                payload={'draft_id':new_id,'snapshot_hash':self.draft_hash(edited),'review_only':True,'instructions':'Check this exact human-edited message against the evidence and existing action scope. Preserve every word.'}
+                self._enqueue(con,'revise_draft',payload,d['opportunity_id'],'manual-review:'+new_id,later(10))
             return new_id
 
     def decide(self, did, approve):
         with self.connect(write=True) as con:
-            d = con.execute("SELECT * FROM drafts WHERE id=?",(did,)).fetchone()
-            if not d or d["status"] != "awaiting_approval": raise ValueError("Draft is not awaiting approval")
-            opp = con.execute("SELECT * FROM opportunities WHERE id=?",(d["opportunity_id"],)).fetchone()
-            if approve and (not opp["active"] or json.loads(opp["holds"]) or opp["evidence_hash"] != d["evidence_hash"] or opp["status"] in STOPPED_STATUSES):
-                raise ValueError("Opportunity changed or is held; reassess before approval")
-            decision = "approved" if approve else "rejected"
-            con.execute("INSERT INTO approvals VALUES(?,?,?,?,?)",(uuid4().hex,did,self.draft_hash(d),decision,utcnow()))
-            con.execute("UPDATE drafts SET status=? WHERE id=?",(decision,did))
-            con.execute("UPDATE opportunities SET status=? WHERE id=?",(decision,d["opportunity_id"]))
-            if approve:
-                self._enqueue(con,"deliver",{"draft_id":did},d["opportunity_id"],f"deliver:{did}")
-            self.event("human_"+decision,{"draft_id":did,"version":d["version"]},opportunity_id=d["opportunity_id"],con=con)
+            self._decide(con, did, approve)
+
+    def _decide(self, con, did, approve):
+        d = con.execute("SELECT * FROM drafts WHERE id=?",(did,)).fetchone()
+        if not d or d["status"] != "awaiting_approval": raise ValueError("Draft is not awaiting approval")
+        opp = con.execute("SELECT * FROM opportunities WHERE id=?",(d["opportunity_id"],)).fetchone()
+        from .conversations import policy
+        from .action_policy import permitted
+        from .evidence import context_hash,ENGINE_VERSION
+        a=json.loads(d['analysis'])
+        stale=bool(a.get('engine_version')) and a.get('context_hash')!=context_hash(con,opp['id'])
+        if approve and (stale or not permitted(opp,a,policy(con,opp['id']),d) or not opp['active'] or opp['evidence_hash']!=d['evidence_hash'] or opp['status'] in STOPPED_STATUSES):
+            raise ValueError("Opportunity changed or is held; reassess before approval")
+        if approve and con.execute("SELECT 1 FROM jobs WHERE opportunity_id=? AND kind='revise_draft' AND status IN ('queued','running')",(opp['id'],)).fetchone():
+            raise ValueError("An agent is revising this email. Review the new version before approving.")
+        decision = "approved" if approve else "rejected"
+        con.execute("INSERT INTO approvals VALUES(?,?,?,?,?)",(uuid4().hex,did,self.draft_hash(d),decision,utcnow()))
+        con.execute("UPDATE drafts SET status=? WHERE id=?",(decision,did))
+        con.execute("UPDATE opportunities SET status=? WHERE id=?",(decision,d["opportunity_id"]))
+        parent=json.loads(d["analysis"]).get("reply_message_id")
+        if parent:con.execute("UPDATE commercial_tasks SET status=?,updated_at=? WHERE message_id=?",(decision,utcnow(),parent))
+        if approve:
+            self._enqueue(con,"deliver",{"draft_id":did},d["opportunity_id"],f"deliver:{did}")
+        if not approve:
+            con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE opportunity_id=? AND kind IN ('deliver','followup','prepare') AND status IN ('queued','running','blocked_config')",(utcnow(),opp['id']))
+        self.event("human_"+decision,{"draft_id":did,"version":d["version"]},opportunity_id=d["opportunity_id"],con=con)
 
     def deliver(self, job, followup_days=7):
+        from .transport import SimulatedProvider
+        return SimulatedProvider(self).send_approved(job,followup_days)
+
+    def _deliver_simulated(self, job, followup_days=7):
         """Atomic simulated outbox. No email provider, credentials, or network send exists."""
         with self.connect(write=True) as con:
             did = job["payload"]["draft_id"]
@@ -320,9 +409,15 @@ class Store:
             approval = con.execute("SELECT * FROM approvals WHERE draft_id=? AND decision='approved' ORDER BY created_at DESC LIMIT 1",(did,)).fetchone()
             if not d or d["status"]!="approved" or not approval or approval["snapshot_hash"] != self.draft_hash(d):
                 raise ValueError("Action has no current approval")
-            if not opp["active"] or json.loads(opp["holds"]) or opp["evidence_hash"] != d["evidence_hash"] or opp["status"] in STOPPED_STATUSES:
+            from .conversations import policy,outbound_record
+            from .action_policy import permitted
+            from .evidence import context_hash,ENGINE_VERSION
+            a=json.loads(d['analysis'])
+            stale=bool(a.get('engine_version')) and a.get('context_hash')!=context_hash(con,opp['id'])
+            if stale or not permitted(opp,a,policy(con,opp['id']),d) or not opp['active'] or opp['evidence_hash']!=d['evidence_hash'] or opp['status'] in STOPPED_STATUSES:
                 raise ValueError("Opportunity changed or stopped; action blocked")
             con.execute("INSERT INTO outbox VALUES(?,?,?,?,?,?,?,?)",(uuid4().hex,did,opp["id"],d["recipient"],d["subject"],d["body"],"simulated",utcnow()))
+            outbound_record(con,con.execute("SELECT * FROM outbox WHERE draft_id=?",(did,)).fetchone(),d)
             con.execute("UPDATE drafts SET status='simulated' WHERE id=?",(did,))
             con.execute("UPDATE opportunities SET status='awaiting_response' WHERE id=?",(opp["id"],))
             # One follow-up is sufficient to prove scheduling without unbounded campaigns.
@@ -332,10 +427,14 @@ class Store:
             self.event("outbox_simulated",{"draft_id":did,"real_email_sent":False},job["id"],opp["id"],con=con)
 
     def record_outcome(self, oid, kind, note, amount_cents=None, reference=None):
-        statuses = {"reply":"replied","opt_out":"opted_out","closed":"closed","qualified":"qualified","quote":"quoted","order":"won","lost":"lost"}
+        if kind=="reply":
+            from .transport import SimulatedProvider
+            parents=self.rows("SELECT id FROM messages WHERE opportunity_id=? AND direction='outbound' ORDER BY created_at DESC,rowid DESC LIMIT 1",(oid,))
+            if parents:return SimulatedProvider(self).ingest(oid,parents[0]["id"],uuid4().hex,note)
+        statuses = {"reply":"replied","opt_out":"opted_out","closed":"closed","qualified":"qualified","quote":"quoted","order":"won","credit":"won","lost":"lost"}
         if kind not in statuses: raise ValueError("Unknown outcome")
         if not note.strip(): raise ValueError("Record the response or reason")
-        if kind in ("quote","order"):
+        if kind in ("quote","order","credit"):
             if not isinstance(amount_cents,int) or amount_cents < 0 or not reference or not reference.strip():
                 raise ValueError("Quote/order outcomes need a nonnegative amount and unique reference")
             reference = reference.strip()
@@ -345,12 +444,27 @@ class Store:
         with self.connect(write=True) as con:
             if reference and con.execute("SELECT 1 FROM outcomes WHERE opportunity_id=? AND kind=? AND reference=?", (oid,kind,reference)).fetchone():
                 raise ValueError("This reference has already been recorded; no duplicate outcome was added")
-            con.execute("INSERT INTO outcomes(id,opportunity_id,kind,note,provenance,created_at,amount_cents,reference) VALUES(?,?,?,?,?,?,?,?)",(uuid4().hex,oid,kind,note,"manual_demo_input",utcnow(),amount_cents,reference))
+            outcome_id=uuid4().hex
+            con.execute("INSERT INTO outcomes(id,opportunity_id,kind,note,provenance,created_at,amount_cents,reference) VALUES(?,?,?,?,?,?,?,?)",(outcome_id,oid,kind,note,"manual_demo_input",utcnow(),amount_cents,reference))
+            prior=con.execute('SELECT id FROM outbox WHERE opportunity_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',(oid,)).fetchone()
+            if prior:con.execute('INSERT INTO outcome_outreach VALUES(?,?)',(outcome_id,prior['id']))
+            from .conversations import policy
+            if kind in ("opt_out","lost"):
+                con.execute("INSERT INTO customer_context(opportunity_id,outreach_policy,updated_at) VALUES(?,'stop',?) ON CONFLICT(opportunity_id) DO UPDATE SET outreach_policy='stop',updated_at=excluded.updated_at",(oid,utcnow()))
+            stopped=policy(con,oid)=="stop"
+            prior_status=con.execute("SELECT status FROM opportunities WHERE id=?",(oid,)).fetchone()["status"]
+            if stopped and kind not in ("opt_out","lost"):status=prior_status
             con.execute("UPDATE opportunities SET status=? WHERE id=?",(status,oid))
-            con.execute("UPDATE jobs SET status='cancelled' WHERE opportunity_id=? AND status IN ('queued','blocked_config')",(oid,))
+            con.execute("UPDATE conversations SET status=?,updated_at=? WHERE opportunity_id=?",(status,utcnow(),oid))
+            con.execute("UPDATE commercial_tasks SET status='completed',updated_at=? WHERE opportunity_id=? AND status IN ('pending','awaiting_approval','approved')",(utcnow(),oid))
+            con.execute("UPDATE jobs SET status='cancelled' WHERE opportunity_id=? AND status IN ('queued','running','blocked_config')",(oid,))
             con.execute("UPDATE drafts SET status='cancelled' WHERE opportunity_id=? AND status IN ('awaiting_approval','approved')",(oid,))
+            if kind=='reply' and prior:
+                o=con.execute('SELECT evidence_hash,holds,active FROM opportunities WHERE id=?',(oid,)).fetchone()
+                if o and o['active'] and not json.loads(o['holds']):
+                    self._enqueue(con,'reply',{'evidence_hash':o['evidence_hash'],'outcome_id':outcome_id},oid,'reply:'+outcome_id)
             self.event("outcome_recorded",{"kind":kind,"provenance":"manual_demo_input"},opportunity_id=oid,con=con)
 
 
 # Responses and commercial milestones hand control to a person; never continue a blind sequence.
-STOPPED_STATUSES = {"replied", "closed", "opted_out", "rejected", "qualified", "quoted", "won", "lost"}
+STOPPED_STATUSES = {"deferred", "replied", "closed", "opted_out", "rejected", "qualified", "quoted", "won", "lost"}

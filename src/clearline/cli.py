@@ -13,16 +13,17 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     scan = sub.add_parser("scan")
-    scan.add_argument("--analysis-limit",type=int,default=1,choices=range(4))
+    scan.add_argument("--analysis-limit",type=int,default=-1)
     worker = sub.add_parser("worker")
     worker.add_argument("--once",action="store_true")
     schedule = sub.add_parser("schedule")
     schedule.add_argument("--seconds",type=int,default=86400)
     schedule.add_argument("--disable",action="store_true")
-    schedule.add_argument("--analysis-limit",type=int,default=1,choices=range(4))
+    schedule.add_argument("--analysis-limit",type=int,default=-1)
     retry = sub.add_parser("retry")
     retry.add_argument("job_id")
     sub.add_parser("status")
+    sub.add_parser("assess-portfolio")
     sub.add_parser("verify-api")
     prospect = sub.add_parser("prospects")
     prospect.add_argument("--research-first",action="store_true",help="Queue only the first curated public lead")
@@ -39,6 +40,9 @@ def main():
     elif args.command == "prospects":
         ids = seed_prospects(store,settings.as_of)
         print(json.dumps({"prospect_ids":ids,"job_id":store.queue_prospect(ids[0]) if args.research_first else None},indent=2))
+    elif args.command == "assess-portfolio":
+        from .operations import start_batch
+        print(start_batch(store))
     elif args.command == "status":
         print(json.dumps({"jobs":store.rows("SELECT id,kind,status,error FROM jobs ORDER BY created_at DESC LIMIT 10"),
                           "opportunities":store.rows("SELECT COUNT(*) AS count FROM opportunities WHERE active=1")},indent=2))

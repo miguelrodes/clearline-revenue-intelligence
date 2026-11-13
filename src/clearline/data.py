@@ -63,7 +63,7 @@ def _read(folder, name, required):
     return df, sha256(path.read_bytes()).hexdigest()
 
 
-def scan(folder, policy=ScanPolicy()):
+def scan(folder, policy=ScanPolicy(), include_all=False):
     as_of = pd.Timestamp(policy.as_of)
     if not 0 < policy.decline_fraction < 1 or policy.inactivity_days < 1 or policy.cadence_multiplier <= 0:
         raise ValueError("Invalid scan thresholds")
@@ -106,20 +106,23 @@ def scan(folder, policy=ScanPolicy()):
     current_start = as_of.replace(month=1, day=1)
     previous_start = current_start - pd.DateOffset(years=1)
     previous_end = as_of - pd.DateOffset(years=1)
+    if include_all:
+        unresolved = orders.key.eq("") & orders.customer.ne("")
+        orders.loc[unresolved,"key"] = orders.loc[unresolved].apply(lambda x: "UNRESOLVED|"+x["kind"]+"|"+basic(x["customer"]),axis=1)
     known = orders[orders.key.ne("") & (orders.date.le(as_of) | orders.date.isna())]
     opportunities = []
     for key, all_rows in known.groupby("key"):
         history = all_rows[all_rows.date.lt(as_of)]
         buys = all_rows[all_rows.status.eq("invoiced") & all_rows.qty.gt(0) & all_rows.sku.ne("CL-TRN") & all_rows.date.notna()]
         direct = buys[buys.sales_channel.eq("direct")]
-        if direct.empty:
+        if direct.empty and not include_all:
             continue
         dates = buys.date.drop_duplicates().sort_values()
         direct_dates = direct.date.drop_duplicates().sort_values()
         median_gap = float(dates.diff().dt.days.dropna().median()) if len(dates) > 1 else None
         direct_gap = float(direct_dates.diff().dt.days.dropna().median()) if len(direct_dates) > 1 else None
-        age = int((as_of - dates.max()).days)
-        direct_age = int((as_of - direct_dates.max()).days)
+        age = int((as_of - dates.max()).days) if len(dates) else 0
+        direct_age = int((as_of - direct_dates.max()).days) if len(direct_dates) else 0
         prior = history[history.date.ge(previous_start) & history.date.lt(previous_end)]
         current = history[history.date.ge(current_start)]
         prior_cents, current_cents = int(prior.net_cents.sum()), int(current.net_cents.sum())
@@ -148,7 +151,7 @@ def scan(folder, policy=ScanPolicy()):
             sku_rows.append(row)
             if sku != "CL-TRN" and pt > 0 and ct < pt * (1-policy.decline_fraction) and row["prior_cents"] >= cents(policy.minimum_prior_revenue):
                 signals.append({"type": "product_decline", "sku": sku, "prior_tests": pt, "current_tests": ct})
-        if not signals:
+        if not signals and not include_all:
             continue
         cr = cm.loc[key].to_dict() if key in cm.index else {}
         pr = pm.loc[key].to_dict() if key in pm.index else {}
@@ -161,7 +164,7 @@ def scan(folder, policy=ScanPolicy()):
         if tuple(key.split("|")[1:]) in missing_signatures: holds.append("possible_missing_state_alias")
         if len(cities) > 1: holds.append("multiple_shipping_cities")
         if not pr or not cities or basic(pr.get("city", "")) not in {basic(x) for x in cities}: holds.append("identity_needs_review")
-        name = pr.get("agency_name") or direct.customer.iloc[0]
+        name = pr.get("agency_name") or all_rows.customer.iloc[0]
         name_tier = "exact_name_state" if all(n == name for n in set(all_rows.customer)) else "reviewable_alias"
         evidence = {
             "provenance": "fictional_case_data", "as_of": policy.as_of,
@@ -170,7 +173,7 @@ def scan(folder, policy=ScanPolicy()):
             "account_key": key, "name": name, "state": key.split("|")[0], "match_tier": name_tier,
             "aliases": sorted(set(all_rows.customer)), "source_rows": list(map(int, all_rows.source_row)),
             "crm_id": cr.get("crm_id", ""), "crm_notes": cr.get("notes", ""), "owner": cr.get("owner", ""),
-            "last_contacted": cr.get("last_contacted", ""), "last_purchase": str(dates.max().date()),
+            "last_contacted": cr.get("last_contacted", ""), "last_purchase": str(dates.max().date()) if len(dates) else None,
             "prior_cents": prior_cents, "current_cents": current_cents, "decline_cents": max(0, prior_cents-current_cents),
             "prior_tests": prior_tests, "current_tests": current_tests,
             "signals": signals, "holds": holds, "products": sku_rows,
@@ -182,6 +185,46 @@ def scan(folder, policy=ScanPolicy()):
         opportunities.append({"id": digest(key)[:20], "account_key": key, "name": name, "state": evidence["state"],
                               "decline_cents": evidence["decline_cents"], "holds": holds, "evidence": evidence,
                               "evidence_hash": digest(evidence)})
+    if include_all:
+        for distributor, group in orders[orders.sales_channel.eq("distributor")].groupby("bill_to_account"):
+            if not distributor: continue
+            key="DISTRIBUTOR|buyer|"+basic(distributor)
+            prior=group[group.date.ge(previous_start)&group.date.lt(previous_end)]
+            current=group[group.date.ge(current_start)&group.date.lt(as_of)]
+            evidence={"provenance":"fictional_case_data","as_of":policy.as_of,"record_scope":"Distributor bill-to buyer; overlaps attributed end-customer sales. Never add to agency totals.",
+                "name":distributor,"state":"MULTI","account_key":key,"comparison":{"prior_start":str(previous_start.date()),"current_start":str(current_start.date()),"current_end_exclusive":policy.as_of},
+                "prior_cents":int(prior.net_cents.sum()),"current_cents":int(current.net_cents.sum()),"prior_tests":int(prior.tests.sum()),"current_tests":int(current.tests.sum()),
+                "decline_cents":max(0,int(prior.net_cents.sum()-current.net_cents.sum())),"signals":[],"holds":["known_distributor_channel"],"products":[],
+                "source_rows":list(map(int,group.source_row)),"limits":["Missing end customers require sell-through reconciliation. Distributor and agency views overlap."],"crm_notes":""}
+            opportunities.append({"id":digest(key)[:20],"account_key":key,"name":distributor,"state":"MULTI","decline_cents":evidence["decline_cents"],"holds":evidence["holds"],"evidence":evidence,"evidence_hash":digest(evidence)})
+    if include_all:
+        # CRM-only customers belong in the assessment universe. The public-agency
+        # directory is a prospect universe, so it is deliberately not added here.
+        saved_keys={o['account_key'] for o in opportunities}
+        crm['portfolio_key']=crm.apply(lambda r:r['key'] or 'CRM_UNRESOLVED|'+r['kind']+'|'+basic(r['account_name']),axis=1)
+        for key,group in crm.groupby('portfolio_key'):
+            if key in saved_keys: continue
+            holds=['missing_purchase_history','identity_needs_review']
+            if len(group)>1: holds.append('ambiguous_identity')
+            first=group.iloc[0]; name=first.account_name
+            evidence={'provenance':'fictional_case_data','as_of':policy.as_of,'record_scope':'CRM-only account with no confidently linked purchase history; zero attributed revenue is not proof of no purchases.',
+                'account_key':key,'name':name,'state':first.state or 'UNRESOLVED','match_tier':'unresolved','aliases':sorted(set(group.account_name)),
+                'source_rows':[],'crm_source_rows':list(map(int,group.source_row)),'crm_id':first.crm_id,'crm_notes':' | '.join(group.notes),
+                'owner':first.owner,'last_contacted':first.last_contacted,'last_purchase':None,
+                'prior_cents':0,'current_cents':0,'decline_cents':0,'prior_tests':0,'current_tests':0,'signals':[],'holds':holds,'products':[],
+                'limits':['No confidently linked orders. Verify identity and direct/distributor purchase history before classifying recovery or net-new status.','CRM notes have no independent timestamp.']}
+            opportunities.append({'id':digest(key)[:20],'account_key':key,'name':name,'state':evidence['state'],'decline_cents':0,'holds':holds,'evidence':evidence,'evidence_hash':digest(evidence)})
+    # Invalidate reasoning on relevant row-level changes even when aggregate totals are unchanged.
+    raw_order_fields=['source_row','order_id','order_date','bill_to_account','end_customer','ship_to_city','ship_to_state','sales_channel','sku','qty','unit_price','line_total','status']
+    for item in opportunities:
+        e=item['evidence'];assigned=orders[orders.source_row.isin(e.get('source_rows',[]))]
+        linked_crm=crm[(crm.key==item['account_key']) | (crm.crm_id==e.get('crm_id',''))]
+        linked_public=public[public.key==item['account_key']]
+        e['source_fingerprint']=digest({'orders':assigned[raw_order_fields].to_dict('records'),
+            'crm':linked_crm[['source_row','crm_id','account_name','state','owner','notes','last_contacted']].to_dict('records'),
+            'public':linked_public[['source_row','agency_name','state','city']].to_dict('records'),
+            'catalogue':products[products.sku.isin(set(assigned.sku)|{'CL-TRN'})].to_dict('records')})
+        item['evidence_hash']=digest(e)
     current = orders[orders.date.ge(current_start) & orders.date.lt(as_of)]
     prior = orders[orders.date.ge(previous_start) & orders.date.lt(previous_end)]
     summary = {"as_of": policy.as_of, "rows": len(orders), "hashes": {"orders": oh, "products": ph, "crm_accounts": ch, "public_agencies": ah},
