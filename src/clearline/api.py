@@ -36,7 +36,7 @@ def create_app(settings=None):
     @app.middleware("http")
     async def local_mutations(request: Request, call_next):
         if request.url.path not in ("/mcp","/mcp/") and request.method not in ("GET","HEAD","OPTIONS"):
-            if request.headers.get("x-clearline-client") != "web" or request.headers.get("origin", "http://localhost:3000") not in ("http://localhost:3000","http://127.0.0.1:3000"):
+            if request.headers.get("x-clearline-client") != "web" or request.headers.get("origin", "http://localhost:3000") not in ("http://localhost:3000","http://127.0.0.1:3000","http://localhost:3001","http://127.0.0.1:3001"):
                 return JSONResponse({"detail":"Local app requests only"}, status_code=403)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -85,6 +85,24 @@ def create_app(settings=None):
     def save_contact_clearance(oid:str,body:ContactClearanceInput):return service.save_contact_clearance(oid,**body.model_dump())
     @app.post('/api/investigations/{task_id}/resolve')
     def resolve_investigation(task_id:str,body:InvestigationResolution):return service.resolve_investigation(task_id,body.resolution)
+
+    @app.get('/api/features')
+    def features():return {'prospect_screening':settings.screening_enabled}
+    @app.get('/api/screening')
+    def screening_summary():return service.screening_summary()
+    @app.get('/api/screening/agencies')
+    def screening_agencies(q:str='',classification:str='',outcome:str='',sort:str='priority',offset:int=0,limit:int=50):
+        return service.screening_list(q,classification,outcome,sort,offset,limit)
+    @app.get('/api/screening/agencies/{aid}')
+    def screening_detail(aid:str):return service.screening_detail(aid)
+    class ScreeningInput(BaseModel):
+        evidence_hash:str
+    @app.post('/api/screening/agencies/{aid}/qualify',status_code=202)
+    def screening_qualify(aid:str,body:ScreeningInput):return service.screening_qualify(aid,body.evidence_hash)
+    @app.post('/api/screening/qualify-shortlist',status_code=202)
+    def screening_shortlist():return service.screening_shortlist()
+    @app.post('/api/screening/scan',status_code=202)
+    def screening_scan():return service.screening_scan()
 
     @app.get("/api/health")
     def get_health():

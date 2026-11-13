@@ -44,6 +44,24 @@ def build_mcp(service):
             return server.tool(structured_output=True,annotations=ToolAnnotations(readOnlyHint=read,destructiveHint=not read,idempotentHint=read or idempotent,openWorldHint=False))(wrapped)
         return decorate
 
+    if service.settings.screening_enabled:
+        @tool(read=True)
+        def get_prospect_screening()->Envelope:
+            """Read fictional Phase 3 screening coverage and qualification results. No outreach eligibility."""
+            return service.screening_summary()
+        @tool(read=True)
+        def query_screened_agencies(q:str='',classification:str='',outcome:str='',sort:str='priority',offset:Offset=0,limit:Limit=25)->Envelope:
+            """Search only fictional agency screening records. Unmatched is not proven net-new."""
+            return service.screening_list(q,classification,outcome,sort,offset,limit)
+        @tool(read=True)
+        def get_screened_agency(agency_id:str)->Envelope:
+            """Read fictional attributes, original evidence, qualification and independent review. Never attach real web facts."""
+            return service.screening_detail(agency_id)
+        @tool(idempotent=True)
+        def qualify_screened_agency(agency_id:str,evidence_hash:str)->Envelope:
+            """Queue bounded AI qualification of this exact evidence. Incurs API usage; never prepares outreach or authorizes contact."""
+            return service.screening_qualify(agency_id,evidence_hash)
+
     @tool(read=True)
     def get_commercial_signals(account_id:str|None=None)->Envelope:
         """Read all detected Phase 1/2 opportunities and their assessment dispositions; dollars overlap."""

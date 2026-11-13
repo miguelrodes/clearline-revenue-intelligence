@@ -3,6 +3,6 @@ const config: NextConfig = {
   devIndicators: false,
   turbopack: { root: process.cwd() },
   outputFileTracingRoot: process.cwd(),
-  async rewrites() { return [{ source: "/api/:path*", destination: "http://127.0.0.1:8000/api/:path*" }]; },
+  async rewrites() { return [{ source: "/api/:path*", destination: `${process.env.CLEARLINE_API_ORIGIN || 'http://127.0.0.1:8000'}/api/:path*` }]; },
 };
 export default config;

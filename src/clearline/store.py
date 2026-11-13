@@ -88,6 +88,8 @@ class Store:
             con.executescript(EVIDENCE_SCHEMA)
             from .commercial import SCHEMA as COMMERCIAL_SCHEMA
             con.executescript(COMMERCIAL_SCHEMA)
+            from .screening import SCHEMA as SCREENING_SCHEMA
+            con.executescript(SCREENING_SCHEMA)
 
     def heartbeat(self, state):
         with self.connect(write=True) as con:
@@ -271,7 +273,7 @@ class Store:
             job=con.execute('SELECT status FROM jobs WHERE id=?',(jid,)).fetchone()
             if job and job['status']=='blocked_config' and con.execute("SELECT 1 FROM controls WHERE name='api_blocked'").fetchone():
                 con.execute("DELETE FROM controls WHERE name='api_blocked'")
-                con.execute("UPDATE jobs SET status='queued',due_at=?,error=NULL WHERE status='blocked_config' AND kind IN ('analyze','prepare','reply','revise_draft','revenue_brief','prospect_research','prospect_qualify')",(utcnow(),))
+                con.execute("UPDATE jobs SET status='queued',due_at=?,error=NULL WHERE status='blocked_config' AND kind IN ('analyze','prepare','reply','revise_draft','revenue_brief','prospect_research','prospect_qualify','agency_qualify')",(utcnow(),))
             con.execute("UPDATE jobs SET status='queued',due_at=?,error=NULL WHERE id=? AND status IN ('failed','blocked_config')", (utcnow(),jid))
 
     def schedule(self, interval_seconds=86400, enabled=True, analysis_limit=-1, policy=None):

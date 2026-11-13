@@ -280,3 +280,39 @@ class ApplicationService(BusinessAccess):
     def schedule(self, body: ScheduleInput):
         self.store.schedule(enabled=body.enabled, analysis_limit=body.analysis_limit, policy={key:getattr(body,key) for key in ('inactivity_days','decline_fraction','open_order_review_days','replenishment_min_dates','replenishment_max_cv')})
         return self.health()
+
+    def screening_guard(self):
+        if not self.settings.screening_enabled:raise NotFound('Prospect Screening is not enabled')
+
+    def screening_summary(self):
+        self.screening_guard()
+        from .screening import summary
+        return summary(self.store)
+
+    def screening_list(self,q='',classification='',outcome='',sort='priority',offset=0,limit=50):
+        self.screening_guard()
+        from .screening import listing
+        return listing(self.store,q,classification,outcome,sort,offset,limit)
+
+    def screening_detail(self,aid):
+        self.screening_guard()
+        from .screening import detail
+        try:return detail(self.store,aid)
+        except ValueError:raise NotFound('Screened agency not found')
+
+    def screening_qualify(self,aid,evidence_hash):
+        self.screening_guard()
+        from .screening import queue
+        return queue(self.store,self.settings,aid,evidence_hash)
+
+    def screening_scan(self):
+        self.screening_guard()
+        from .screening import read_sources,VERSION
+        from .data import digest
+        _,hashes=read_sources(self.settings.data_dir)
+        return {'job_id':self.store.enqueue('agency_scan',{},key='agency_scan:'+digest([VERSION,hashes,self.settings.as_of]))}
+
+    def screening_shortlist(self):
+        self.screening_guard()
+        from .screening import queue_shortlist
+        return queue_shortlist(self.store,self.settings)

@@ -120,3 +120,13 @@ thead,.work-section-title{background:#F7F9FC}th{color:#52657C}td{border-bottom-c
 .contact-clearance-channel-note{padding:10px 12px;border-left:3px solid var(--amber);border-radius:3px;background:#fff8eb;color:#694a1c;line-height:1.55}
 @media(max-width:900px){.contact-clearance-review{grid-template-columns:1fr}.contact-clearance-heading{align-items:flex-start;flex-direction:column}}
 @media(max-width:600px){.contact-clearance-row td{padding:8px}.contact-clearance-review{padding:12px}.contact-clearance-fields{grid-template-columns:1fr}.contact-clearance-actions{justify-content:flex-start}}
+
+/* Phase 3 uses existing surfaces, typography and button treatments. */
+.screening .page-heading,.screening-filters,.screening-pagination{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;justify-content:space-between}
+.screening-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:1rem;margin:1.5rem 0}
+.screening-metrics .panel{padding:1rem}.screening-metrics strong{display:block;font-size:1.7rem;margin-top:.5rem}
+.screening-filters,.screening-pagination{padding:1rem}.screening-filters input{flex:1;min-width:180px}.screening-filters select{border:none;background:transparent}
+.screening table{min-width:850px;width:100%;border-collapse:collapse}.screening td,.screening th{padding:1rem;text-align:left;border-bottom:1px solid var(--border)}
+.screening td{max-width:320px;vertical-align:top}.screening td small{display:block}.screening .table-scroll,.screening-detail .table-scroll{overflow-x:auto}
+.screening-detail h3{margin:1.5rem 0 .6rem}.screening-detail dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem}
+.screening-detail dt{font-weight:600}.screening-detail dd{margin:0}.screening-detail pre{white-space:pre-wrap}.screening-detail details{margin:1rem 0}

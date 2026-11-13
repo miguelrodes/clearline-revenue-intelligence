@@ -27,6 +27,8 @@ class Settings:
     investigation_max_tokens: int = 6000
     quality_max_revisions: int = 2
 
+    screening_enabled: bool = False
+
     def __post_init__(self):
         if not 1 <= self.concurrency <= self.max_concurrency <= 32 or self.max_attempts < 1:
             raise ValueError("Concurrency must be between 1 and max concurrency (at most 32)")
@@ -63,4 +65,5 @@ class Settings:
             int(os.getenv("CLEARLINE_INVESTIGATION_TIMEOUT_SECONDS", "480")),
             int(os.getenv("CLEARLINE_INVESTIGATION_MAX_TOKENS", "6000")),
             int(os.getenv("CLEARLINE_QUALITY_MAX_REVISIONS", "2")),
+            os.getenv("CLEARLINE_SCREENING_ENABLED", "0") == "1",
         )

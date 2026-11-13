@@ -15,3 +15,6 @@ node_modules/
 .next/
 coverage/
 *.tsbuildinfo
+
+# Reused local dependency symlink in isolated worktrees
+frontend/node_modules

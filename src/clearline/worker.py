@@ -51,7 +51,15 @@ async def execute_job(store,settings,job,analyst=analyze,capacity=None):
     start=time.monotonic(); started_at=utcnow(); status='failed'; concurrency=capacity.current if capacity else 1
     store.event('job_started',{'kind':job['kind'],'concurrency':concurrency},job['id'],job['opportunity_id'])
     try:
-        if job['kind']=='scan':
+        if job['kind']=='agency_qualify':
+            from .screening_agent import qualify
+            from .screening import save_result
+            save_result(store,job,await qualify(store,job,settings))
+        elif job['kind']=='agency_scan':
+            from .screening import screen
+            if not settings.screening_enabled:raise ValueError('Prospect Screening is not enabled')
+            await asyncio.to_thread(screen,store,settings)
+        elif job['kind']=='scan':
             policy=ScanPolicy(**{'as_of':settings.as_of,**job['payload'].get('policy',{})})
             summary,items=await asyncio.to_thread(scan,settings.data_dir,policy,True)
             store.save_scan(summary,items)
@@ -90,7 +98,7 @@ async def execute_job(store,settings,job,analyst=analyze,capacity=None):
             await generate(store,job,settings)
         else: raise ValueError('Unknown job kind')
         store.finish(job['id']); status=store.rows('SELECT status FROM jobs WHERE id=?',(job['id'],))[0]['status']
-        if capacity and status=='completed' and job['kind'] in ('analyze','prospect_research','prospect_qualify'):
+        if capacity and status=='completed' and job['kind'] in ('analyze','prospect_research','prospect_qualify','agency_qualify'):
             capacity.completed(time.monotonic()-start)
         store.event('job_'+status,{'kind':job['kind']},job['id'],job['opportunity_id'])
     except MissingCredentials as exc:
@@ -145,7 +153,7 @@ def run_one(store,settings,analyst=analyze):
     if not job: return False
     asyncio.run(execute_job(store,settings,job,analyst));return True
 
-async def run_pool(store,settings,analyst=analyze,drain=False,auto_brief=True):
+async def run_pool(store,settings,analyst=analyze,drain=False,auto_brief=True,kinds=None):
     from .operations import queue_brief
     capacity=Capacity(settings); active=set(); stopping=False; last_brief=0.; last_capacity=0.; last_coverage=0.; last_sources=0.
     def stop():
@@ -161,11 +169,12 @@ async def run_pool(store,settings,analyst=analyze,drain=False,auto_brief=True):
                 if task.done(): task.result()
             active={t for t in active if not t.done()}
             if not stopping and not store.paused():
-                store.tick()
+                if kinds is None:store.tick()
                 if time.monotonic()>=capacity.cooldown:
                     while len(active)<capacity.current:
                         blocked=bool(store.rows("SELECT 1 FROM controls WHERE name='api_blocked'"))
-                        job=store.claim(['scan','deliver','followup'] if blocked else None)
+                        if blocked and kinds is not None:break
+                        job=store.claim(['scan','deliver','followup'] if blocked else kinds)
                         if not job: break
                         active.add(asyncio.create_task(execute_job(store,settings,job,analyst,capacity)))
                 actual=store.rows("SELECT COUNT(*) n FROM jobs WHERE status='running' AND kind IN ('analyze','prepare','prospect_research','prospect_qualify','reply','revise_draft')")[0]['n']
@@ -201,7 +210,8 @@ async def run_pool(store,settings,analyst=analyze,drain=False,auto_brief=True):
                         await asyncio.to_thread(queue_brief,store);last_brief=time.monotonic()
             if drain and not active:
                 if store.paused() or store.rows("SELECT 1 FROM controls WHERE name='api_blocked'"):break
-                due=store.rows("SELECT 1 FROM jobs WHERE status='queued' AND due_at<=? LIMIT 1",(utcnow(),))
+                condition=" AND kind IN ("+",".join("?" for _ in kinds)+")" if kinds else ""
+                due=store.rows("SELECT 1 FROM jobs WHERE status='queued' AND due_at<=?"+condition+" LIMIT 1",(utcnow(),*(kinds or [])))
                 if not due: break
             await asyncio.sleep(.2 if active else 1)
     finally:
