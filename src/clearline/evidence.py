@@ -23,7 +23,9 @@ def context_hash(con,oid):
         material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
     for table,fields in [('contact_authorizations','recipient,role,route,evidence,authorized,updated_at'),('investigation_resolutions','task_id,resolution,updated_at')]:
         material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
-    material['contact_clearance_notes']=[dict(r) for r in con.execute("SELECT task_id,contact_name,recipient,role,phone,route,distributor,verification_evidence,status,updated_at FROM contact_clearance_notes WHERE opportunity_id=? AND status='verified'",(oid,))]
+    contact_notes=[dict(r) for r in con.execute("SELECT task_id,contact_name,recipient,role,phone,route,distributor,verification_evidence,status,updated_at FROM contact_clearance_notes WHERE opportunity_id=? AND status='verified'",(oid,))]
+    # Preserve cached assessments for accounts with no verified contact changes.
+    if contact_notes:material['contact_clearance_notes']=contact_notes
     epoch=con.execute('SELECT value FROM controls WHERE name=?',('reassessment:'+oid,)).fetchone()
     material['reassessment_epoch']=epoch['value'] if epoch else None
     return digest(material)

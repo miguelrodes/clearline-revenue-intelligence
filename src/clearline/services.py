@@ -25,6 +25,7 @@ class ApplicationService(BusinessAccess):
         rows = self.store.rows('SELECT * FROM drafts WHERE id=?', (did,))
         if not rows:
             raise NotFound('Draft not found')
+        if self.store.opportunity(rows[0]['opportunity_id'])['workflow']=='agency_screening':self.screening_guard()
         return rows[0]
 
     def jobs(self):
@@ -86,7 +87,7 @@ class ApplicationService(BusinessAccess):
             return []
         term = q.strip().lower()
         found = []
-        for a in self.store.rows('SELECT id,name,state,workflow,evidence FROM opportunities WHERE active=1'):
+        for a in self.store.rows("SELECT id,name,state,workflow,evidence FROM opportunities WHERE active=1 AND workflow IN ('recovery','prospecting')"):
             e = json.loads(a.pop('evidence'))
             if term in ' '.join([a['name'], a['state'], *e.get('aliases', [])]).lower():
                 found.append(a)
@@ -316,3 +317,23 @@ class ApplicationService(BusinessAccess):
         self.screening_guard()
         from .screening import queue_shortlist
         return queue_shortlist(self.store,self.settings)
+
+    def screening_decision(self,aid,decision,rationale):
+        self.screening_guard()
+        from .screening_workflow import record_decision
+        return record_decision(self.store,aid,decision,rationale)
+
+    def screening_information(self,aid,information,context_hash):
+        self.screening_guard()
+        from .screening_workflow import record_information
+        return record_information(self.store,aid,information,context_hash)
+
+    def screening_outreach(self,aid,context_hash):
+        self.screening_guard()
+        from .screening_workflow import queue_outreach
+        return queue_outreach(self.store,self.settings,aid,context_hash)
+
+    def screening_activity(self,aid,kind,note):
+        self.screening_guard()
+        from .screening_workflow import record_activity
+        return record_activity(self.store,aid,kind,note)

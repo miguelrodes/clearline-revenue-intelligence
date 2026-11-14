@@ -45,6 +45,33 @@ def verified_payload(task_id=None, *, route="direct", distributor=""):
     }
 
 
+def legacy_context_hash(con, oid):
+    """The contact-clearance schema must preserve hashes from the prior engine context."""
+    from clearline.data import digest
+    from clearline.action_policy import SOFT_HOLDS
+    o=con.execute('SELECT evidence_hash,holds FROM opportunities WHERE id=?',(oid,)).fetchone()
+    material={'evidence_hash':o['evidence_hash'] if o else None}
+    holds=set(json.loads(o['holds'])) if o else set()
+    if 'possible_missing_state_alias' in holds and not holds-SOFT_HOLDS:
+        material['execution_policy_revision']='missing-state-neutral-support-v1'
+    for table,fields in [('messages','id,direction,subject,body,reply_to'),('outcomes','id,kind,note,amount_cents,reference'),('customer_context','contact,channel,outreach_policy')]:
+        material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
+    for table,fields in [('contact_authorizations','recipient,role,route,evidence,authorized,updated_at'),('investigation_resolutions','task_id,resolution,updated_at')]:
+        material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
+    epoch=con.execute('SELECT value FROM controls WHERE name=?',('reassessment:'+oid,)).fetchone()
+    material['reassessment_epoch']=epoch['value'] if epoch else None
+    return digest(material)
+
+
+def test_empty_contact_clearance_schema_preserves_cached_assessment_hash(store, opportunity):
+    from clearline.evidence import ENGINE_VERSION, context_hash, current_assessment
+    with store.connect() as con:
+        prior_hash=legacy_context_hash(con,opportunity['id'])
+        assessment={'engine_version':ENGINE_VERSION,'context_hash':prior_hash}
+        assert context_hash(con,opportunity['id'])==prior_hash
+        assert current_assessment(con,opportunity['id'],assessment)
+
+
 def test_lone_tree_partial_contact_is_saved_without_clearing_hold_or_authorizing(settings, store, opportunity):
     from clearline.evidence import context_hash
 

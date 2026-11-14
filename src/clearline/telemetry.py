@@ -24,10 +24,19 @@ def reset_seconds(value):
 @asynccontextmanager
 async def client_for(store,job,settings):
     from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+    budget_store=store
+    if job.get('kind') in ('agency_qualify','agency_outreach') and settings.screening_budget_path and settings.screening_budget_path.resolve()!=store.path.resolve():
+        from .store import Store
+        budget_store=Store(settings.screening_budget_path)
     inflight = {}
     async def started(request):
         if '/responses' not in str(request.url): return
         rid=uuid4().hex
+        if job.get('kind') in ('agency_qualify','agency_outreach'):
+            current=store.rows('SELECT status FROM jobs WHERE id=?',(job['id'],))
+            if not current or current[0]['status']!='running':raise ValueError('Agency job was cancelled; no further model request sent')
+            from .screening_budget import reserve
+            reserve(budget_store,job,settings,rid,json.loads(request.content))
         request.extensions['clearline_request_id']=rid
         inflight[rid]=time.monotonic()
         store.event('model_request_started',{'request_id':rid},job['id'],job.get('opportunity_id'))
@@ -42,6 +51,9 @@ async def client_for(store,job,settings):
         store.event('rate_headers',headers,job['id'],job.get('opportunity_id'))
         try: body=response.json()
         except ValueError: body={}
+        if job.get('kind') in ('agency_qualify','agency_outreach'):
+            from .screening_budget import settle
+            settle(budget_store,rid,body,response.status_code)
         if job.get('kind') in ('analyze','prepare','reply','revise_draft') and response.status_code==200:
             store.event('model_output',{'response_id':body.get('id'),'status':body.get('status'),'incomplete_details':body.get('incomplete_details'),'output':body.get('output',[])},job['id'],job.get('opportunity_id'))
         usage=body.get('usage') or {}; model=body.get('model',settings.model)

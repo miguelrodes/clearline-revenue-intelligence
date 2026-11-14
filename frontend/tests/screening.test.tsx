@@ -12,3 +12,27 @@ describe('Isolated prospect screening',()=>{
  it('queues exact evidence without an approval or send control',async()=>{vi.mocked(request).mockResolvedValue({job_id:'job'});render(<ScreeningDetail id="agency"/>);fireEvent.click(screen.getByText('Investigate and qualify'));await waitFor(()=>expect(request).toHaveBeenCalledWith('/screening/agencies/agency/qualify','POST',{evidence_hash:'hash'}));expect(screen.queryByText(/Approve/)).toBeNull();expect(screen.getByText(/No authorized contact/)).toBeTruthy()});
  it('surfaces unavailable backend errors',()=>{vi.mocked(useApi).mockReturnValue({data:undefined,error:'Unavailable',reload:vi.fn()});render(<ProspectScreening/>);expect(screen.getByRole('alert').textContent).toBe('Unavailable')});
 });
+
+describe('Prospect decisions and clearance',()=>{
+ it('shows ranking factors and sends a reasoned hold decision',async()=>{
+  const detailed={...row,context_hash:'ctx',qualification_current:false,workflow:{decision:'new',rationale:'',information:{},stage:'not_contacted'},outreach_prerequisites:['Verify the intended recipient'],drafts:[],history:[],ranking:{score:85,eligible:true,interpretation:'Not a purchase probability',restriction:'Channel unknown',factors:[{key:'fit',label:'Institution and product fit',points:40,maximum:40,reason:'Mail screening hypothesis'}]}};
+  vi.mocked(useApi).mockReturnValue({data:detailed,error:'',reload:vi.fn()});vi.mocked(request).mockResolvedValue({});render(<ScreeningDetail id="agency"/>);
+  expect(screen.getByText(/Discovery score: 85.0/)).toBeTruthy();
+  fireEvent.change(screen.getByLabelText('Reason or specific check needed'),{target:{value:'Confirm operational use before spending more time'}});
+  fireEvent.click(screen.getByText('Hold pending a check'));
+  await waitFor(()=>expect(request).toHaveBeenCalledWith('/screening/agencies/agency/decision','POST',{decision:'held',rationale:'Confirm operational use before spending more time'}));
+  expect((screen.getByText('Prepare personalized email') as HTMLButtonElement).disabled).toBe(true);
+ });
+ it('saves partial contact information without auto qualification or permission',async()=>{
+  vi.mocked(useApi).mockReturnValue({data:{...row,context_hash:'ctx',workflow:{decision:'accepted',rationale:'Fit',information:{},stage:'not_contacted'},outreach_prerequisites:['Verify contact'],drafts:[],history:[]},error:'',reload:vi.fn()});vi.mocked(request).mockResolvedValue({changed:true,ai_triggered:false});render(<ScreeningDetail id="agency"/>);
+  fireEvent.change(screen.getByLabelText('Intended contact address'),{target:{value:'buyer@example.invalid'}});fireEvent.click(screen.getByText('Save verified information'));
+  await waitFor(()=>expect(request).toHaveBeenCalledWith('/screening/agencies/agency/information','POST',{information:{recipient:'buyer@example.invalid'},context_hash:'ctx'}));
+  expect(request).toHaveBeenCalledTimes(1);expect((screen.getByLabelText('Outreach to this contact is authorized') as HTMLInputElement).checked).toBe(false);
+ });
+ it('requires an explicit click to approve the exact displayed version',async()=>{
+  const d={id:'draft',version:2,recipient:'simulation@example.invalid',subject:'Application discussion',body:'Would a discussion of the mailroom application help?',status:'awaiting_approval'};
+  vi.mocked(useApi).mockReturnValue({data:{...row,context_hash:'ctx',workflow:{decision:'accepted',rationale:'Fit',information:{},stage:'not_contacted'},outreach_prerequisites:[],drafts:[d],history:[]},error:'',reload:vi.fn()});vi.mocked(request).mockResolvedValue({});render(<ScreeningDetail id="agency"/>);
+  expect(request).not.toHaveBeenCalled();fireEvent.click(screen.getByText('Approve version 2 & simulate sending'));
+  await waitFor(()=>expect(request).toHaveBeenCalledWith('/drafts/draft/decision','POST',{version:2,recipient:d.recipient,subject:d.subject,body:d.body,approve:true}));
+ });
+});

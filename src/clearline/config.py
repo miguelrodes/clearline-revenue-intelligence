@@ -28,6 +28,9 @@ class Settings:
     quality_max_revisions: int = 2
 
     screening_enabled: bool = False
+    # Isolated acceptance databases share the preview's incremental cost ledger.
+    # Default preserves all pre-existing workers and configuration.
+    screening_budget_path: Path | None = None
 
     def __post_init__(self):
         if not 1 <= self.concurrency <= self.max_concurrency <= 32 or self.max_attempts < 1:

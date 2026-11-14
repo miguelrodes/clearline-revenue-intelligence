@@ -11,6 +11,7 @@ from .data import ScanPolicy, scan
 from .store import Store, STOPPED_STATUSES, utcnow, later
 from .prospect_agent import research_prospect, qualify_prospect
 from .telemetry import reset_seconds
+from .screening_budget import BudgetLimit
 
 @contextmanager
 def worker_lock(path):
@@ -55,6 +56,12 @@ async def execute_job(store,settings,job,analyst=analyze,capacity=None):
             from .screening_agent import qualify
             from .screening import save_result
             save_result(store,job,await qualify(store,job,settings))
+        elif job['kind']=='agency_outreach':
+            from .screening_agent import prepare_outreach
+            from .screening_workflow import save_outreach
+            save_outreach(store,job,await prepare_outreach(store,job,settings))
+        elif job['kind']=='agency_deliver':
+            store.deliver(job,settings.followup_days)
         elif job['kind']=='agency_scan':
             from .screening import screen
             if not settings.screening_enabled:raise ValueError('Prospect Screening is not enabled')
@@ -101,6 +108,9 @@ async def execute_job(store,settings,job,analyst=analyze,capacity=None):
         if capacity and status=='completed' and job['kind'] in ('analyze','prospect_research','prospect_qualify','agency_qualify'):
             capacity.completed(time.monotonic()-start)
         store.event('job_'+status,{'kind':job['kind']},job['id'],job['opportunity_id'])
+    except BudgetLimit as exc:
+        status='blocked_config';store.finish(job['id'],status,str(exc))
+        store.event('agency_budget_blocked',{'reason':str(exc)},job['id'],job.get('opportunity_id'))
     except MissingCredentials as exc:
         status='blocked_config';store.finish(job['id'],status,str(exc))
     except asyncio.CancelledError:
@@ -108,6 +118,14 @@ async def execute_job(store,settings,job,analyst=analyze,capacity=None):
         # Persisted running jobs are reclaimed by the next lock owner.
         raise
     except Exception as exc:
+        # The OpenAI client may wrap a pre-dispatch HTTP-hook rejection as an
+        # APIConnectionError. A local budget stop must not enter network retries.
+        cause=exc
+        while cause is not None and not isinstance(cause,BudgetLimit):cause=cause.__cause__
+        if isinstance(cause,BudgetLimit):
+            status='blocked_config';store.finish(job['id'],status,str(cause))
+            store.event('agency_budget_blocked',{'reason':str(cause)},job['id'],job.get('opportunity_id'))
+            return
         code=getattr(exc,'code',None); http=getattr(exc,'status_code',None)
         safe=f'{type(exc).__name__} (status={http}, code={code})'
         if type(exc).__name__ in ('ModelBehaviorError','QualityFailure','ValueError'):

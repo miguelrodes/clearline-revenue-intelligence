@@ -6,6 +6,7 @@ from .data import basic,canonical,digest
 from .store import utcnow
 
 VERSION='screening-1.1'
+QUALIFICATION_ENGINE='agency-qualification-1'
 CATEGORIES=('verified_existing','possible_existing_channel','unverified_prospect','ambiguous_identity','unsuitable')
 OUTCOMES=('qualified','investigate','human_verification','defer','reject')
 SCHEMA="""
@@ -50,6 +51,8 @@ def screen(store,settings):
     fingerprint=digest(dict(version=VERSION,hashes=hashes,as_of=settings.as_of))
     latest=store.rows('SELECT fingerprint FROM agency_screening_runs ORDER BY created_at DESC,rowid DESC LIMIT 1')
     if latest and latest[0]['fingerprint']==fingerprint:
+        from .screening_rank import rebuild
+        rebuild(store)
         return summary(store)
     agencies=tables['public_agencies']; grouped=defaultdict(list);key_groups=defaultdict(set)
     exact_index=defaultdict(list);alias_index=defaultdict(list);missing_state=defaultdict(list)
@@ -108,6 +111,8 @@ def screen(store,settings):
         con.executemany('INSERT INTO agency_screenings(id,name,state,agency_type,classification,priority,evidence_hash,evidence,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,state=excluded.state,agency_type=excluded.agency_type,classification=excluded.classification,priority=excluded.priority,evidence_hash=excluded.evidence_hash,evidence=excluded.evidence,active=1,updated_at=excluded.updated_at',items)
         con.execute('INSERT OR REPLACE INTO agency_screening_runs VALUES(?,?,?)',(fingerprint,json.dumps(run),utcnow()))
         store.event('agency_screening_complete',run,con=con)
+    from .screening_rank import rebuild
+    rebuild(store)
     return summary(store)
 
 def detail(store,aid):
@@ -116,23 +121,43 @@ def detail(store,aid):
     row=rows[0];row['evidence']=json.loads(row['evidence'])
     q=store.rows('SELECT result,created_at FROM agency_qualifications WHERE agency_id=? AND evidence_hash=? ORDER BY created_at DESC,rowid DESC LIMIT 1',(aid,row['evidence_hash']))
     row['qualification']=json.loads(q[0]['result']) if q else None
+    from .screening_rank import get
+    from .screening_workflow import state,context_hash,prerequisites
+    row['ranking']=get(store,aid)
+    row['workflow']=state(store,aid)
+    row['context_hash']=context_hash(row['evidence_hash'],row['workflow']['information'],row['workflow']['activity_revision'])
+    row['qualification_current']=bool(row['qualification'] and row['qualification'].get('context_hash',row['evidence_hash'])==row['context_hash'] and row['qualification'].get('qualification_engine',QUALIFICATION_ENGINE)==QUALIFICATION_ENGINE)
+    row['last_assessed_at']=q[0]['created_at'] if q else None
+    row['outreach_prerequisites']=prerequisites(row)
+    row['history']=store.rows('SELECT * FROM agency_activity WHERE agency_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100',(aid,))
+    row['drafts']=store.rows('SELECT id,version,recipient,subject,body,status,created_at FROM drafts WHERE opportunity_id=? ORDER BY version DESC',('agency:'+aid,))
     row['jobs']=store.rows("SELECT id,status,error,attempts FROM jobs WHERE kind='agency_qualify' AND json_extract(payload,'$.agency_id')=? AND json_extract(payload,'$.evidence_hash')=? ORDER BY created_at DESC,rowid DESC LIMIT 3",(aid,row['evidence_hash']))
     return row
 
 def listing(store,q='',classification='',outcome='',sort='priority',offset=0,limit=50):
     if classification and classification not in CATEGORIES:raise ValueError('Unknown classification')
-    if outcome and outcome not in OUTCOMES+('not_assessed','queued','failed'):raise ValueError('Unknown qualification status')
+    if outcome and outcome not in OUTCOMES+('not_assessed','queued','failed','needs_reassessment','accepted','held','rejected'):raise ValueError('Unknown qualification status')
     if sort not in ('priority','name','state') or not 1<=limit<=100 or offset<0:raise ValueError('Invalid sort or page size')
-    rows=store.rows("""SELECT a.*, (SELECT result FROM agency_qualifications r WHERE r.agency_id=a.id AND r.evidence_hash=a.evidence_hash ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1) assessment,
+    rows=store.rows("""SELECT a.*, ar.score,ar.explanation ranking,aw.decision user_decision,aw.rationale,aw.information,aw.stage,
+    (SELECT result FROM agency_qualifications r WHERE r.agency_id=a.id AND r.evidence_hash=a.evidence_hash ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1) assessment,
     (SELECT status FROM jobs j WHERE j.kind='agency_qualify' AND json_extract(j.payload,'$.agency_id')=a.id AND json_extract(j.payload,'$.evidence_hash')=a.evidence_hash ORDER BY j.created_at DESC,j.rowid DESC LIMIT 1) job_status
-    FROM agency_screenings a WHERE active=1""")
+    FROM agency_screenings a LEFT JOIN agency_rankings ar ON ar.agency_id=a.id LEFT JOIN agency_workflow aw ON aw.agency_id=a.id WHERE active=1""")
     items=[]
+    from .screening_workflow import activity_revisions
+    activity=activity_revisions(store)
     for r in rows:
         e=json.loads(r.pop('evidence'));a=json.loads(r.pop('assessment') or 'null');r['qualification_status']=a['decision']['outcome'] if a else 'queued' if r['job_status'] in ('queued','running') else 'failed' if r['job_status'] in ('failed','blocked_config') else 'not_assessed'
-        if q.lower() not in (r['name']+' '+r['state']+' '+e['agency'][0]['city']).lower() or (classification and r['classification']!=classification) or (outcome and r['qualification_status']!=outcome):continue
+        from .screening_workflow import context_hash
+        h=context_hash(r['evidence_hash'],json.loads(r.pop('information') or '{}'),activity.get(r['id']))
+        if a and (a.get('context_hash',r['evidence_hash'])!=h or a.get('qualification_engine',QUALIFICATION_ENGINE)!=QUALIFICATION_ENGINE):r['qualification_status']='needs_reassessment'
+        r['user_decision']=r['user_decision'] or 'new';r['ranking']=json.loads(r['ranking'] or 'null')
+        if r['user_decision']=='rejected' and outcome!='rejected':continue
+        if q.lower() not in (r['name']+' '+r['state']+' '+e['agency'][0]['city']).lower() or (classification and r['classification']!=classification) or (outcome and outcome not in (r['qualification_status'],r['user_decision'])):continue
         r.update(product_fit=e['fit_hypothesis_skus'],ranking_reason=e['ranking_reason'],source_refs=[x['ref'] for x in e['agency']],next_action=a['decision']['next_task'] if a else e['classification_reason'],review_passed=a['review_passed'] if a else None)
+        if r['user_decision'] in ('held','rejected'):r['next_action']=('On hold: ' if r['user_decision']=='held' else 'Discarded: ')+(r['rationale'] or '')
+        elif r['stage'] and r['stage']!='not_contacted':r['next_action']='Review recorded '+r['stage'].replace('_',' ')+' activity before any further outreach.'
         items.append(r)
-    if sort=='priority':items.sort(key=lambda r:(0 if r['qualification_status']=='qualified' and r['review_passed'] else 1,r['priority'],r['name'],r['id']))
+    if sort=='priority':items.sort(key=lambda r:(0 if r['ranking'] and r['ranking']['eligible'] and r['user_decision'] not in ('held','rejected') and r['stage'] in (None,'not_contacted') and r['qualification_status'] not in ('reject','defer') else 1,-(r['score'] or 0),r['name'],r['id']))
     else:items.sort(key=lambda r:(r[sort],r['name'],r['id']))
     return dict(items=items[offset:offset+limit],total=len(items),offset=offset,limit=limit)
 
@@ -140,28 +165,48 @@ def summary(store):
     runs=store.rows('SELECT summary FROM agency_screening_runs ORDER BY created_at DESC,rowid DESC LIMIT 1')
     result=json.loads(runs[0]['summary']) if runs else {'source_records':0,'unique_records':0,'classifications':{}}
     # SQL counts only current accepted-or-explicitly-held reports, never stale reports.
-    reports=store.rows("""SELECT result FROM agency_qualifications r JOIN agency_screenings a ON a.id=r.agency_id AND a.evidence_hash=r.evidence_hash AND a.active=1 WHERE r.rowid=(SELECT r2.rowid FROM agency_qualifications r2 WHERE r2.agency_id=a.id AND r2.evidence_hash=a.evidence_hash ORDER BY created_at DESC,rowid DESC LIMIT 1)""")
+    reports=store.rows("""SELECT a.id,r.result,a.evidence_hash,aw.information FROM agency_qualifications r JOIN agency_screenings a ON a.id=r.agency_id AND a.evidence_hash=r.evidence_hash AND a.active=1 LEFT JOIN agency_workflow aw ON aw.agency_id=a.id WHERE r.rowid=(SELECT r2.rowid FROM agency_qualifications r2 WHERE r2.agency_id=a.id AND r2.evidence_hash=a.evidence_hash ORDER BY created_at DESC,rowid DESC LIMIT 1)""")
+    from .screening_workflow import context_hash,activity_revisions
+    activity=activity_revisions(store)
+    reports=[r for r in reports if json.loads(r['result']).get('context_hash',r['evidence_hash'])==context_hash(r['evidence_hash'],json.loads(r['information'] or '{}'),activity.get(r['id'])) and json.loads(r['result']).get('qualification_engine',QUALIFICATION_ENGINE)==QUALIFICATION_ENGINE]
     result['qualification_counts']=dict(Counter(json.loads(r['result'])['decision']['outcome'] for r in reports));result['assessed']=len(reports);result['limits']=LIMITS
-    result['excluded_records']=store.rows("SELECT COUNT(*) n FROM agency_screenings a WHERE active=1 AND (classification='unsuitable' OR json_extract((SELECT result FROM agency_qualifications r WHERE r.agency_id=a.id AND r.evidence_hash=a.evidence_hash ORDER BY created_at DESC,rowid DESC LIMIT 1),'$.decision.outcome')='reject')")[0]['n']
+    rejected={r['id'] for r in reports if json.loads(r['result'])['decision']['outcome']=='reject'}
+    held={r['id'] for r in reports if json.loads(r['result'])['decision']['outcome']=='defer'}
+    for r in store.rows('SELECT a.id,a.classification,w.decision FROM agency_screenings a LEFT JOIN agency_workflow w ON w.agency_id=a.id WHERE a.active=1'):
+        if r['classification']=='unsuitable' or r['decision']=='rejected':rejected.add(r['id'])
+        if r['decision']=='held':held.add(r['id'])
+    result['excluded_records']=len(rejected);result['held_or_deferred']=len(held-rejected)
     result['jobs']=store.rows("SELECT status,COUNT(*) count FROM jobs WHERE kind='agency_qualify' GROUP BY status")
+    result['user_decisions']={r['decision']:r['n'] for r in store.rows('SELECT decision,COUNT(*) n FROM agency_workflow GROUP BY decision')}
+    result['awaiting_qualification']=listing(store,classification='unverified_prospect',outcome='not_assessed',limit=1)['total']
+    from .screening_budget import summary as budget_summary
+    result['budget']=budget_summary(store)
     return result
 
 def queue(store,settings,aid,evidence_hash):
     if not settings.screening_enabled:raise ValueError('Prospect Screening is not enabled')
     row=detail(store,aid)
     if row['evidence_hash']!=evidence_hash:raise ValueError('Evidence changed; reload before qualification')
-    return {'job_id':store.enqueue('agency_qualify',{'agency_id':aid,'evidence_hash':evidence_hash,'version':VERSION},key='agency:'+aid+':'+evidence_hash+':'+VERSION)}
+    if row['workflow']['decision'] in ('held','rejected'):raise ValueError('Accept the prospect before requesting another assessment')
+    if row['qualification_current']:return {'job_id':None,'reused':True,'qualification':row['qualification']}
+    return {'job_id':store.enqueue('agency_qualify',{'agency_id':aid,'evidence_hash':evidence_hash,'context_hash':row['context_hash'],'version':VERSION},key='agency:'+aid+':'+row['context_hash']+':'+VERSION)}
 
 def save_result(store,job,result):
     with store.connect(write=True) as con:
         live=con.execute('SELECT evidence_hash FROM agency_screenings WHERE id=? AND active=1',(job['payload']['agency_id'],)).fetchone()
         state=con.execute('SELECT status FROM jobs WHERE id=?',(job['id'],)).fetchone()
         if not live or live['evidence_hash']!=job['payload']['evidence_hash'] or state['status']!='running':raise ValueError('Cancelled or stale qualification; no result saved')
+        from .screening_workflow import current_context,log
+        current=current_context(con,job['payload']['agency_id'],live['evidence_hash'])
+        if job['payload'].get('context_hash',live['evidence_hash'])!=current:raise ValueError('Verified information changed during qualification')
+        result={**result,'context_hash':current,'qualification_engine':QUALIFICATION_ENGINE}
         con.execute('INSERT OR IGNORE INTO agency_qualifications VALUES(?,?,?,?,?)',(job['id'],job['payload']['agency_id'],live['evidence_hash'],json.dumps(result),utcnow()))
+        log(con,job['payload']['agency_id'],'qualification',result['decision']['outcome'],{'job_id':job['id'],'review_passed':result.get('review_passed',False)})
 
 
 def queue_shortlist(store,settings,limit=10):
     if not settings.screening_enabled:raise ValueError('Prospect Screening is not enabled')
     if not 1<=limit<=10:raise ValueError('Qualify at most ten candidates per batch')
-    rows=listing(store,classification='unverified_prospect',outcome='not_assessed',limit=limit)['items']
-    return {'job_ids':[queue(store,settings,r['id'],r['evidence_hash'])['job_id'] for r in rows if r['priority']<=2], 'note':'Bounded internal qualification only; no outreach or automatic continuation.'}
+    rows=listing(store,classification='unverified_prospect',outcome='not_assessed',limit=100)['items']
+    rows=[r for r in rows if r['priority']<=2 and r['user_decision'] not in ('held','rejected')][:limit]
+    return {'job_ids':[queue(store,settings,r['id'],r['evidence_hash'])['job_id'] for r in rows], 'note':'Bounded internal qualification only; no outreach or automatic continuation.'}

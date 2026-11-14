@@ -104,6 +104,30 @@ def create_app(settings=None):
     @app.post('/api/screening/scan',status_code=202)
     def screening_scan():return service.screening_scan()
 
+    class AgencyDecisionInput(BaseModel):
+        decision:Literal['accepted','held','rejected']
+        rationale:str
+    class AgencyInformationInput(BaseModel):
+        context_hash:str
+        information:dict[str,str|bool]
+    class AgencyContextInput(BaseModel):
+        context_hash:str
+    class AgencyActivityInput(BaseModel):
+        kind:Literal['contact_attempted','response_received','advanced']
+        note:str
+    @app.post('/api/screening/agencies/{aid}/decision')
+    def agency_decision(aid:str,body:AgencyDecisionInput):
+        return service.screening_decision(aid,body.decision,body.rationale)
+    @app.post('/api/screening/agencies/{aid}/information')
+    def agency_information(aid:str,body:AgencyInformationInput):
+        return service.screening_information(aid,body.information,body.context_hash)
+    @app.post('/api/screening/agencies/{aid}/outreach',status_code=202)
+    def agency_outreach(aid:str,body:AgencyContextInput):
+        return service.screening_outreach(aid,body.context_hash)
+    @app.post('/api/screening/agencies/{aid}/activity')
+    def agency_activity(aid:str,body:AgencyActivityInput):
+        return service.screening_activity(aid,body.kind,body.note)
+
     @app.get("/api/health")
     def get_health():
         return service.get_health()

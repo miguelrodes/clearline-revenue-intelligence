@@ -90,6 +90,10 @@ class Store:
             con.executescript(COMMERCIAL_SCHEMA)
             from .screening import SCHEMA as SCREENING_SCHEMA
             con.executescript(SCREENING_SCHEMA)
+            from .screening_rank import SCHEMA as RANK_SCHEMA
+            from .screening_workflow import SCHEMA as WORKFLOW_SCHEMA
+            from .screening_budget import SCHEMA as BUDGET_SCHEMA
+            con.executescript(RANK_SCHEMA + WORKFLOW_SCHEMA + BUDGET_SCHEMA)
 
     def heartbeat(self, state):
         with self.connect(write=True) as con:
@@ -410,6 +414,9 @@ class Store:
         from .action_policy import permitted
         from .evidence import context_hash,ENGINE_VERSION
         a=json.loads(d['analysis'])
+        if approve and opp['workflow']=='agency_screening':
+            from .screening_workflow import assert_current
+            assert_current(con,opp,a)
         stale=bool(a.get('engine_version')) and a.get('context_hash')!=context_hash(con,opp['id'])
         from .commercial import execution_issues
         if approve and opp['workflow']=='recovery' and execution_issues(con,opp['id'],a):raise ValueError('Resolve blocking prerequisites and authorize the recipient before approval')
@@ -424,7 +431,7 @@ class Store:
         parent=json.loads(d["analysis"]).get("reply_message_id")
         if parent:con.execute("UPDATE commercial_tasks SET status=?,updated_at=? WHERE message_id=?",(decision,utcnow(),parent))
         if approve:
-            self._enqueue(con,"deliver",{"draft_id":did},d["opportunity_id"],f"deliver:{did}")
+            self._enqueue(con,"agency_deliver" if opp['workflow']=='agency_screening' else "deliver",{"draft_id":did},d["opportunity_id"],f"deliver:{did}")
         if not approve:
             con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE opportunity_id=? AND kind IN ('deliver','followup','prepare') AND status IN ('queued','running','blocked_config')",(utcnow(),opp['id']))
         self.event("human_"+decision,{"draft_id":did,"version":d["version"]},opportunity_id=d["opportunity_id"],con=con)
@@ -450,6 +457,9 @@ class Store:
             from .action_policy import permitted
             from .evidence import context_hash,ENGINE_VERSION
             a=json.loads(d['analysis'])
+            if opp['workflow']=='agency_screening':
+                from .screening_workflow import assert_current
+                assert_current(con,opp,a)
             stale=bool(a.get('engine_version')) and a.get('context_hash')!=context_hash(con,opp['id'])
             from .commercial import execution_issues
             if opp['workflow']=='recovery' and execution_issues(con,opp['id'],a):raise ValueError('Commercial prerequisites changed before delivery')
@@ -461,7 +471,10 @@ class Store:
             con.execute("UPDATE opportunities SET status='awaiting_response' WHERE id=?",(opp["id"],))
             # One follow-up is sufficient to prove scheduling without unbounded campaigns.
             count = con.execute("SELECT COUNT(*) FROM outbox WHERE opportunity_id=?",(opp["id"],)).fetchone()[0]
-            if count == 1:
+            if opp['workflow']=='agency_screening':
+                from .screening_workflow import sent
+                sent(con,a['agency_id'],did)
+            elif count == 1:
                 self._enqueue(con,"followup",{"parent_draft_id":did},opp["id"],f"followup:{did}",later(followup_days*86400))
             self.event("outbox_simulated",{"draft_id":did,"real_email_sent":False},job["id"],opp["id"],con=con)
 

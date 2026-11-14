@@ -133,3 +133,13 @@ thead,.work-section-title{background:#F7F9FC}th{color:#52657C}td{border-bottom-c
 
 .screening-metrics .panel{margin:0}.screening table{table-layout:fixed}.screening th:nth-child(1){width:23%}.screening th:nth-child(2){width:16%}.screening th:nth-child(3){width:14%}.screening th:nth-child(4){width:16%}.screening th:nth-child(5){width:31%}
 .screening td,.screening th{white-space:normal;overflow-wrap:anywhere}.screening td .action-link{white-space:normal;text-align:left;justify-content:flex-start}.screening .page-heading .button-row{gap:20px}
+
+/* Phase 3 controls only; recovery and real-world prospect surfaces retain their styles. */
+.screening-detail label{display:block;margin:.8rem 0;font-weight:500}
+.screening-detail textarea{display:block;width:100%;min-height:75px;margin-top:.4rem}
+.screening-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.6rem 1rem}
+.screening-form-grid input,.screening-form-grid select{display:block;width:100%;margin-top:.4rem}
+.screening-detail .screening-check{display:flex;align-items:center;gap:.65rem;font-weight:400}
+.screening-detail .screening-check input{width:auto}.screening-email{white-space:pre-wrap}
+.screening-detail li{margin-bottom:.5rem}.screening-detail .button-row{flex-wrap:wrap;gap:1rem}
+@media(max-width:700px){.screening-form-grid{grid-template-columns:1fr}}

@@ -15,6 +15,13 @@ def permitted(opp,analysis,policy='normal',draft=None):
     if policy=='stop' or holds-SOFT_HOLDS:return False
     # Later-phase implementation is preserved, never exposed as recovery eligibility.
     if o.get('workflow')=='prospecting':return not holds and policy=='normal'
+    if o.get('workflow')=='agency_screening':
+        from .screening_agent import passes
+        return (not holds and policy=='normal' and a.get('agency_engine_version')=='agency-outreach-1'
+            and bool(a.get('review')) and passes(a['review'])
+            and a.get('proposal_hash')==digest([a.get('subject'),a.get('body'),'simulation@example.invalid',a.get('context_hash')])
+            and (not draft or all(dict(draft)[k]==a.get(k) for k in ('subject','body','recipient')))
+            and a.get('recipient')=='simulation@example.invalid')
     from .evidence import ENGINE_VERSION
     if a.get('engine_version')!=ENGINE_VERSION:return False
     quality=a.get('quality') or {};plan=a.get('commercial_plan') or {}

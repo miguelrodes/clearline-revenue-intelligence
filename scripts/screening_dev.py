@@ -11,7 +11,7 @@ from clearline.screening import screen
 def configuration(env_file,enabled):
     if env_file:load_dotenv(env_file,override=False)
     settings=Settings.load()
-    return replace(settings,db_path=ROOT/'runtime/phase3/screening.sqlite3',screening_enabled=enabled,concurrency=3,max_concurrency=6)
+    return replace(settings,db_path=ROOT/'runtime/phase3/screening.sqlite3',screening_budget_path=ROOT/'runtime/phase3/screening.sqlite3',screening_enabled=enabled,concurrency=3,max_concurrency=6)
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('command',choices=['screen','api','worker']);p.add_argument('--env-file',type=Path);p.add_argument('--enable-screening',action='store_true');p.add_argument('--port',type=int,default=8001);args=p.parse_args()
@@ -26,6 +26,7 @@ def main():
     else:
         from clearline.worker import run_pool,worker_lock
         with worker_lock(settings.db_path):
-            store.recover_interrupted()
-            asyncio.run(run_pool(store,settings,auto_brief=False,kinds=['agency_scan','agency_qualify']))
+            with store.connect(write=True) as con:
+                con.execute("UPDATE jobs SET status='queued',error='Recovered isolated agency worker' WHERE status='running' AND kind IN ('agency_scan','agency_qualify','agency_outreach','agency_deliver')")
+            asyncio.run(run_pool(store,settings,auto_brief=False,kinds=['agency_scan','agency_qualify','agency_outreach','agency_deliver']))
 if __name__=='__main__':main()
