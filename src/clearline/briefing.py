@@ -205,6 +205,30 @@ def render_brief(output, state):
     return {'summary':' '.join(points) or output.summary or ' '.join(state['facts'][f] for f in output.summary_fact_ids),'summary_points':points or ([output.summary] if output.summary else [state['facts'][f] for f in output.summary_fact_ids]),'priority_items':priority_items,'actions':actions,'signal_advice':[a.model_dump() for a in output.signal_advice]}
 
 
+def priority_revenue_context(store, state, items):
+    """Read-only financial context; never invalidate cached AI wording for display changes.
+
+    Count each named customer once per priority. Distributor revenue cannot be
+    added to downstream buyer revenue; mixed groups explicitly exclude it.
+    """
+    accounts={r['id']:r for r in store.rows('SELECT id,account_key,workflow FROM opportunities')}
+    catalog={a['id']:a for a in state['actions']}
+    for item in items:
+        action=catalog[item['action_id']]
+        members={m['id']:m for m in action.get('members',[])}
+        buyers=[];excluded=False
+        for oid,member in members.items():
+            account=accounts.get(oid)
+            if not account or account['workflow']!='recovery':continue
+            if account['account_key'].startswith('DISTRIBUTOR|'):
+                excluded=True
+                continue
+            buyers.append(member)
+        cents=sum(max(0,m.get('historical_decline_cents') or 0) for m in buyers)
+        if cents>0:
+            item['revenue_context']={'historical_decline_cents':cents,'accounts':len(buyers),'excludes_distributors':excluded}
+
+
 def current_brief(store, state=None):
     state = snapshot(store) if state is None else state
     source_hash = digest(state)
@@ -214,4 +238,5 @@ def current_brief(store, state=None):
     result = {'brief':None,'stale':bool(previous and not saved),'last_generated_at':previous[0]['created_at'] if previous else None,'job':jobs[0] if jobs else None}
     if saved:
         result['brief'] = {**render_brief(json.loads(saved[0]['body']),state),'created_at':saved[0]['created_at'],'source_hash':source_hash}
+        priority_revenue_context(store,state,result['brief']['priority_items'])
     return result

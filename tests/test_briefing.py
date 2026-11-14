@@ -247,3 +247,38 @@ def test_investigation_brief_cannot_invent_legacy_export_controls():
     with pytest.raises(ValueError,match='actual customer-task controls'):render_brief(output,state)
     output['recommendations'][0]['description']='Ask the order owner for the missing status and record the finding on the customer.'
     assert render_brief(output,state)['actions'][0]['why']==output['recommendations'][0]['description']
+
+
+def test_priority_revenue_context_deduplicates_buyers_and_excludes_distributors():
+    from clearline.briefing import priority_revenue_context
+    class ReadOnlyStore:
+        def rows(self,query):
+            assert query=='SELECT id,account_key,workflow FROM opportunities'
+            return [dict(id=oid,account_key=key,workflow=workflow) for oid,key,workflow in [
+                ('buyer','CUSTOMER|example','recovery'),('growth','CUSTOMER|growing','recovery'),
+                ('channel','DISTRIBUTOR|example','recovery'),('prospect','AGENCY|example','agency_screening')]]
+    members=[{'id':oid,'historical_decline_cents':cents} for oid,cents in [
+        ('buyer',10000),('buyer',10000),('growth',-5000),('channel',90000),('prospect',50000)]]
+    state={'actions':[{'id':'orders','members':members},{'id':'contacts','members':members[:1]},
+                      {'id':'no_value','members':members[2:]}]}
+    items=[{'action_id':a['id']} for a in state['actions']]
+    priority_revenue_context(ReadOnlyStore(),state,items)
+    assert items[0]['revenue_context']=={'historical_decline_cents':10000,'accounts':2,'excludes_distributors':True}
+    assert items[1]['revenue_context']=={'historical_decline_cents':10000,'accounts':1,'excludes_distributors':False}
+    assert 'revenue_context' not in items[2]
+
+
+def test_existing_brief_gets_revenue_context_without_new_ai_or_saved_changes(store,opportunity):
+    state=snapshot(store);output=choose(state);action=state['actions'][0]
+    output['priorities']=[{'action_id':action['id'],'title':'Review customers',
+                          'text':'{customers} customers need investigation; review their purchasing changes.'}]
+    with store.connect(write=True) as con:
+        con.execute('INSERT INTO operational_briefs VALUES(?,?,?,?,?)',
+                    ('saved',digest(state),json.dumps(state),json.dumps(output),utcnow()))
+    before=store.rows('SELECT * FROM operational_briefs');jobs=store.rows('SELECT * FROM jobs')
+    result=current_brief(store)
+    assert not result['stale']
+    point=result['brief']['priority_items'][0]
+    assert point['revenue_context']['historical_decline_cents']==store.opportunity('example')['decline_cents']
+    assert store.rows('SELECT * FROM operational_briefs')==before
+    assert store.rows('SELECT * FROM jobs')==jobs

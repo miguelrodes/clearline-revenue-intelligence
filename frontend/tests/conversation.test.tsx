@@ -32,8 +32,8 @@ it('renders saved reply assessments with structured channel evidence from older 
 it('uses a local scroll control for the prepared response instead of opening another account overlay',async()=>{
  vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>({...thread,tasks:[{id:'t',title:'Review response.',status:'awaiting_approval'}]})})));
  render(<ConversationPanel id="lone"/>);
- expect(await screen.findByRole('button',{name:'Review the prepared response below'})).toBeInTheDocument();
- expect(screen.queryByRole('link',{name:'Review the prepared response below'})).not.toBeInTheDocument();
+ expect(await screen.findByRole('button',{name:'Review the prepared response'})).toBeInTheDocument();
+ expect(screen.queryByRole('link',{name:'Review the prepared response'})).not.toBeInTheDocument();
 });
 
 

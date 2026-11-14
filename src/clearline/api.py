@@ -76,9 +76,11 @@ def create_app(settings=None):
     def commercial_signals(oid:str|None=None):return service.commercial_signals(oid)
     @app.get('/api/accounts/{oid}/commercial-work')
     def commercial_work(oid:str):
+        from .task_purpose import task_purpose
         service.account(oid)
         notes=store.rows('SELECT * FROM contact_clearance_notes WHERE opportunity_id=?',(oid,))
-        return {'signals':service.commercial_signals(oid),'tasks':store.rows("SELECT * FROM investigation_tasks WHERE opportunity_id=? AND status='pending'",(oid,)), 'authorizations':store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(oid,)), 'contact_clearance':notes[0] if notes else None}
+        tasks=store.rows("SELECT * FROM investigation_tasks WHERE opportunity_id=? AND status='pending'",(oid,))
+        return {'signals':service.commercial_signals(oid),'tasks':[task | task_purpose(task) for task in tasks], 'authorizations':store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(oid,)), 'contact_clearance':notes[0] if notes else None}
     @app.post('/api/accounts/{oid}/contact-authorization')
     def authorize_contact(oid:str,body:AuthorizationInput):return service.authorize_contact(oid,**body.model_dump())
     @app.post('/api/accounts/{oid}/contact-clearance')
@@ -221,6 +223,10 @@ def create_app(settings=None):
     @app.get("/api/transactions")
     def transactions(year: int=Query(default=2026,ge=2025,le=2026), q: str="", offset: int=Query(default=0,ge=0)):
         return service.transactions(year,q,offset)
+
+    @app.get("/api/accounts/{oid}/orders")
+    def account_order_history(oid: str, offset: int=Query(default=0,ge=0), limit: int=Query(default=50,ge=1,le=100)):
+        return service.account_orders(oid,offset=offset,limit=limit)
 
     @app.get("/api/accounts/{oid}")
     def detail(oid: str):

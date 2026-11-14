@@ -78,10 +78,11 @@ thead,.work-section-title{background:#F7F9FC}th{color:#52657C}td{border-bottom-c
 .brief-action-main>.action-link{max-width:210px;text-align:right}
 @media(max-width:760px){.brief-action-main{gap:12px;flex-wrap:wrap}.brief-action-main>.action-link{margin-left:auto;max-width:none}.brief-action-body{flex-basis:100%}.brief-financial{gap:4px 12px}}
 
-.operational-brief .brief-summary-points{list-style:disc;padding:0 0 4px 20px;font-size:16px;line-height:1.55;width:100%;max-width:none;color:#33465D}
-.brief-summary-points>li{padding-left:4px;margin:0 0 8px}.brief-summary-points strong{font-weight:650;color:var(--ink)}
+.operational-brief .brief-summary-points{list-style:disc;padding:0 0 8px 20px;font-size:16px;line-height:1.55;width:100%;max-width:none;color:#33465D;overflow-x:auto;scrollbar-width:thin}
+.brief-summary-points>li{padding-left:4px;margin:0 0 8px;white-space:nowrap}.brief-summary-points strong{font-weight:650;color:var(--ink)}
 .brief-summary-points>li:last-child{margin-bottom:0}
 .brief-summary-points>li::marker{color:var(--blue)}
+@media(max-width:760px){.brief-summary-points>li{white-space:normal}}
 
 /* Opportunity Signal recommendations share Overview's open action-row design. */
 .signal-actions-header{margin:22px 0 4px;padding-top:0;border-top:0}
@@ -143,3 +144,25 @@ thead,.work-section-title{background:#F7F9FC}th{color:#52657C}td{border-bottom-c
 .screening-detail .screening-check input{width:auto}.screening-email{white-space:pre-wrap}
 .screening-detail li{margin-bottom:.5rem}.screening-detail .button-row{flex-wrap:wrap;gap:1rem}
 @media(max-width:700px){.screening-form-grid{grid-template-columns:1fr}}
+
+/* Informational account identity, separate from commercial decisions. */
+.account-identity{margin:-4px 0 22px;line-height:1.6}.account-classifications{display:flex;flex-wrap:wrap;gap:6px 24px;color:var(--muted);font-size:13px}.account-classifications strong{color:var(--ink);font-weight:550}.account-identity p{margin:8px 0 0;color:var(--muted);font-size:14px}.account-cell .account-description{white-space:normal;min-width:220px;max-width:380px;line-height:1.5}
+
+/* Existing-customer profiles: one continuous page, with transactional tables retained. */
+.account-profile .account-section,.account-profile .panel{background:transparent;border:0;border-radius:0;box-shadow:none;margin:0;padding:26px 0;border-top:1px solid var(--border)}
+.account-profile>.account-section:first-of-type{border-top:0;padding-top:8px}
+.account-profile h2{font-size:22px;font-weight:650;letter-spacing:-.4px;line-height:1.3;margin:0 0 14px}
+.account-profile h3{font-size:16px;line-height:1.4;margin:0 0 8px}
+.account-profile .panel-head{padding:0;margin-bottom:14px;border:0;align-items:baseline}.account-profile .panel-head h2{margin:0}
+.account-profile .content-stack{padding:0}.account-profile p{font-size:14px;line-height:1.7;margin:8px 0 12px;max-width:1100px}
+.account-profile details>summary{cursor:pointer;color:var(--blue);font-size:13px;line-height:1.6}
+.account-profile .commercial-check{padding:16px 0;border-bottom:1px solid var(--border);gap:6px}.account-profile .commercial-check:first-child{padding-top:0}
+.account-profile .commercial-check>strong{font-size:15px}.account-profile .commercial-check p{margin:3px 0}.account-profile .commercial-check>small{color:var(--muted);margin:6px 0}
+.account-profile .commercial-check textarea{max-width:900px;min-height:80px}.account-profile .commercial-check>.action-link{justify-self:start}
+.account-profile .task-financial{color:var(--ink)}.account-profile .conversation-message{background:transparent;border:0;border-radius:0;border-top:1px solid var(--border);padding:18px 0;margin:0}
+.account-profile .history-block{margin-top:26px}.account-profile .history-totals{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px;margin:20px 0 12px}.history-totals span{display:block;color:var(--muted);font-size:13px}.history-totals strong{display:block;font-size:22px;margin-top:6px}
+.account-profile .history-record{padding:12px 0;border-bottom:1px solid var(--border)}.history-pagination{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:12px;font-size:13px;color:var(--muted)}.history-pagination span{margin-right:auto}.account-profile pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.account-profile .table-scroll{background:var(--surface,#fff);border-radius:6px}.account-profile .fine-print{font-size:12px;color:var(--muted)}
+.workflow-status{font-size:11px;line-height:1.5;padding:3px 8px;font-weight:550;border:0;white-space:normal}
+.workflow-status.status-investigating{background:#FFF0DB;color:#854400}.workflow-status.status-verification{background:#FFF8CF;color:#705B00}.workflow-status.status-action{background:#E3EFFF;color:#1555AB}.workflow-status.status-complete{background:#E5F4EB;color:#23633B}.workflow-status.status-blocked{background:#FCE7E7;color:#9A3030}.workflow-status.status-neutral{background:#E8EDF3;color:#46576C}
+@media(max-width:760px){.account-profile .page-head{align-items:flex-start;gap:12px;flex-wrap:wrap}.account-profile .history-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.account-profile h2{font-size:20px}.account-profile .history-block .inline-between{gap:12px;flex-wrap:wrap}.account-profile .table-scroll{max-width:100%}}

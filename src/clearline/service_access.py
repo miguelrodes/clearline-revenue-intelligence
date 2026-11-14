@@ -65,10 +65,11 @@ class BusinessAccess:
             rows=self.store.rows("SELECT * FROM investigation_tasks WHERE id=? AND opportunity_id=? AND status='pending'",(task_id,oid))
             if not rows:raise ValueError('This contact check is no longer pending. Refresh the account before saving.')
             task=rows[0]
-            task_text=(task['title']+' '+task['reason']).casefold()
-            if not re.search(r'contact|recipient|authoriz|identity|match|mapping|route|relationship',task_text):
+            from .task_purpose import task_purpose
+            purpose=task_purpose(task)
+            if not (purpose['contact_check'] or purpose['identity_check']):
                 raise ValueError('This task is not a purchasing-contact or route check')
-            task_is_contact=bool(re.search(r'contact|recipient|authoriz|route|purchasing relationship',task_text)) and not bool(re.search(r'identity|match|mapping|alias',task_text))
+            task_is_contact=purpose['contact_resolvable']
         if verified:
             if not all((values['recipient'],values['role'],values['route'],values['verification_evidence'])):
                 raise ValueError('To verify the contact, provide a recipient, role, purchasing route, and how it was verified')
@@ -129,8 +130,8 @@ class BusinessAccess:
         rows=self.store.rows("SELECT * FROM investigation_tasks WHERE id=? AND status='pending'",(task_id,))
         if not rows:raise ValueError('Pending investigation task not found')
         task=rows[0]
-        import re
-        if re.search(r'contact|recipient|authoriz|route|relationship',(task['title']+' '+task['reason']).casefold()):
+        from .task_purpose import task_purpose
+        if task_purpose(task)['contact_check']:
             auth=self.store.rows('SELECT 1 FROM contact_authorizations WHERE opportunity_id=? AND authorized=1',(task['opportunity_id'],))
             if not auth:raise ValueError('Contact checks require a verified purchasing recipient and route. Use Contact Clearance; a note alone cannot clear this blocker.')
         with self.store.connect(write=True) as con:

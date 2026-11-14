@@ -3,6 +3,23 @@ import {render,screen,fireEvent,waitFor} from '@testing-library/react';
 import {OperationalBriefing,ExecutionPanel} from '../src/components/operations';
 const brief={summary:'You have 15 emails ready to review.',created_at:'2026-11-12T06:00:00Z',actions:[{id:'campaign:1',title:'Review 15 emails',why:'Investigation and drafting are complete.',accounts:15,historical_decline_cents:16119700,href:'/campaigns?campaign=1&pending=1'},{id:'contacts',title:'Review 35 contact gaps',why:'Recipients need verification.',accounts:35,historical_decline_cents:9239700,href:'/opportunities?queue=contacts'},{id:'followups',title:'Review 3 scheduled follow-ups',why:'Already scheduled.',accounts:3,historical_decline_cents:10368000,href:'/actions?category=scheduled&workflow=recovery&kind=followup'}]};
 beforeEach(()=>{vi.restoreAllMocks();vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({brief,stale:false,job:null})}))});
+it('appends scoped historical revenue context without changing the saved explanation or inventing a forecast',async()=>{
+ const priorities=[
+  {action_id:'orders',title:'Orders and credits',text:'39 customers need order or credit checks; ask owners for findings.',revenue_context:{historical_decline_cents:11966508,accounts:36,excludes_distributors:true}},
+  {action_id:'contacts',title:'Purchasing contacts',text:'Verify the purchasing contacts.',revenue_context:{historical_decline_cents:11612600,accounts:27,excludes_distributors:false}},
+  {action_id:'unknown',title:'Customer replies',text:'Review the customer reply.'},
+  {action_id:'already_priced',title:'Lower purchasing',text:'27 customers have $116,126 in historical decline; review emails.',revenue_context:{historical_decline_cents:11612600,accounts:27,excludes_distributors:false}},
+ ];
+ vi.mocked(fetch).mockResolvedValue({ok:true,json:async()=>({brief:{...brief,priority_items:priorities},stale:false,job:null})} as Response);
+ render(<OperationalBriefing/>);
+ const list=await screen.findByRole('list',{name:'Overview brief priorities'});
+ expect(list.children[0]).toHaveTextContent(`${priorities[0].text} — $120K historical decline (excl. distributors).`);
+ expect(list.children[1]).toHaveTextContent('$116K historical decline.');
+ expect(list.children[2]).not.toHaveTextContent('$');
+ expect(list.children[3].querySelector('.brief-revenue-context')).toBeNull();
+ expect(list.children[0].querySelector('.brief-revenue-context')).toHaveAttribute('title',expect.stringContaining('$119,665 historical purchasing decline across 36 customer accounts'));
+ expect(vi.mocked(fetch).mock.calls.every(c=>c[1]?.method==='GET')).toBe(true);
+});
 it('provides real destinations and exposes historical decline without a forecast',async()=>{
  render(<OperationalBriefing/>);
  for(const a of brief.actions)expect(await screen.findByRole('link',{name:a.title})).toHaveAttribute('href',a.href);

@@ -83,6 +83,23 @@ it('presents a short practical next step while retaining the detailed agent asse
  expect(screen.getByRole('link',{name:'Review the prepared information request'})).toHaveAttribute('href','/actions?group=check:orders');
 });
 
+it('renders the expanded business situation from the existing account response without requesting analysis or changing the recommendation',async()=>{
+ const account={id:'growing',name:'Growing customer',workflow:'recovery',status:'no_action',holds:[],decline_cents:0,evidence:{comparison:{prior_start:'2025-01-01',prior_end_exclusive:'2025-11-01',current_start:'2026-01-01',current_end_exclusive:'2026-11-01'},prior_cents:200000,current_cents:250000,prior_tests:500,current_tests:600,last_purchase:'2026-09-01',crm_notes:'Budget resets Oct 1'},assessment:{created_at:'2026-11-12',details:{engine_version:'recovery-4',decision:'no_action',objective:'Continue ordinary account management.',hypotheses:[],unresolved_questions:[],evidence_fields:[],rationale:'Purchasing is growing.',recommended_action:'No recovery outreach is justified.'}},drafts:[],outbox:[],outcomes:[]};
+ const original=JSON.stringify(account);
+ vi.stubGlobal('fetch',vi.fn(async(url)=>({ok:true,json:async()=>String(url).endsWith('/conversation')?{status:'not_started',messages:[],context:{outreach_policy:'normal',contact:null,channel:null},tasks:[]}:account})));
+ render(<AccountSummary id="growing"/>);
+ const heading=await screen.findByRole('heading',{name:'Business Situation'});
+ const section=heading.closest('section')!;
+ expect(section).toHaveTextContent('rose from $2,000 to $2,500 (up $500, 25%)');
+ expect(section).toHaveTextContent('test quantities changed from 500 to 600');
+ expect(section).toHaveTextContent('An undated CRM note says “Budget resets Oct 1”');
+ expect(section).not.toHaveTextContent('Continue ordinary account management.');
+ expect(screen.getAllByText('Continue ordinary account management.').length).toBeGreaterThan(0);
+ expect(vi.mocked(fetch).mock.calls.every(c=>c[1]?.method==='GET')).toBe(true);
+ expect(vi.mocked(fetch).mock.calls.every(c=>!String(c[0]).includes('/assess'))).toBe(true);
+ expect(JSON.stringify(account)).toBe(original);
+});
+
 it('limits signal bulk approval to matching customers even when a campaign spans signals',async()=>{
  const original=vi.mocked(fetch).getMockImplementation()!;
  vi.mocked(fetch).mockImplementation(async(path,opts)=>path==='/api/opportunities'?{ok:true,json:async()=>[{id:'0',signals:['inactivity'],partial_decline:false},{id:'1',signals:['product_decline'],partial_decline:false}]} as Response:original(path,opts));

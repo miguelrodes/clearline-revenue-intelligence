@@ -7,11 +7,11 @@ This branch combines the newer Phase 1–2 contact-clearance implementation (inc
 Use three terminals from this integration checkout. Reuse the original repository's installed Python environment and frontend dependencies. Replace the two environment-specific paths below with the original checkout's actual locations; do not paste credentials into a terminal command or chat.
 
 ```bash
-# Terminal 1: API; the script always selects this checkout's runtime/phase3/screening.sqlite3.
+# Terminal 1: API; defaults to this checkout's runtime/phase3/screening.sqlite3.
 /path/to/original/.venv/bin/python scripts/screening_dev.py api \
   --enable-screening --port 8002 --env-file /path/to/original/.env
 
-# Terminal 2: agency-only worker. No recovery auto-coverage, scheduled scan, or Phase 4 research.
+# Terminal 2: combined worker. No portfolio catch-up, scheduled scan, or Phase 4 research.
 /path/to/original/.venv/bin/python scripts/screening_dev.py worker \
   --enable-screening --env-file /path/to/original/.env
 
@@ -24,6 +24,10 @@ CLEARLINE_API_ORIGIN=http://127.0.0.1:8002 npm run start -- --port 3001
 Open http://127.0.0.1:3001/screening. Port 3000 remains the stable demo. The API's local-origin checks already permit port 3001. Do not start this preview on an arbitrary frontend port without updating the permitted origins. The Next.js production build embeds its API rewrite; rebuild it with the isolated origin if changing backends.
 
 The screening feature flag defaults to off. The isolated launcher sets it explicitly. Existing recovery, contact-clearance, real-world prospecting and authentication paths are retained.
+
+The combined worker handles explicitly queued existing-customer assessments, preparation, replies, revisions, follow-ups, approved simulated deliveries and manual briefing refreshes, together with Phase 3 agency jobs. Its nonempty job allowlist excludes full recovery scans and Phase 4 research. `auto_brief=False` also disables source-change scans, portfolio coverage catch-up and automatic briefing generation; the allowlist prevents scheduler ticks. Starting the worker does not create jobs or invalidate saved assessments. Already-requested permitted jobs, including interrupted work, can resume. Explicit `agency_scan` jobs retain their existing deterministic Phase 3 behavior.
+
+For acceptance tests, pass the same `--db-path runtime/acceptance/test.sqlite3` to both API and worker. Only resolved paths inside this checkout's `runtime/` directory are accepted. The selected database also holds that session's Phase 3 usage ledger, so isolated tests cannot write through to the preview ledger. Copy the full database, including its usage records; do not use isolated copies to reset or evade the agreed spending cap. Starting the ordinary worker can execute queued jobs; bounded paid acceptance runs should use the acceptance harness instead.
 
 ## Data and qualification
 
@@ -39,11 +43,11 @@ The screening feature flag defaults to off. The isolated launcher sets it explic
 
 Outreach requires an accepted prospect, current independently accepted qualification, verified operational evidence, a verified recipient and role, explicit permission, and a checked purchasing route/relationship. It is a new relationship introduction, never inferred recovery of an existing buyer. A separate outreach agent and fresh reviewer prepare the exact draft. Drafts use the existing approval snapshots and simulated outbox, under a distinct `agency_screening` workflow. Both approval and delivery recheck context and prerequisites. A later edit to information or a hold revokes stale work. Delivery always goes to `simulation@example.invalid`; no real sending implementation was added.
 
-Agency delivery uses its own worker kind, so the isolated worker cannot consume copied recovery deliveries or follow-ups. Its activity history distinguishes simulated contact, replies and advancement from verified revenue. The Phase 4 real-world records never enter this agency workflow.
+Agency delivery uses its own worker kind. The combined worker also processes explicitly queued recovery deliveries and follow-ups, with the existing exact-version approval and duplicate-delivery checks. Agency activity history distinguishes simulated contact, replies and advancement from verified revenue. The Phase 4 real-world records never enter this agency workflow.
 
 ## Cost ceiling
 
-`agency_usage` is a persistent incremental ledger: at most $5 estimated standard-tier model usage and 15 distinct additional agencies. Before every request, the HTTP hook atomically reserves a conservative input/output upper bound. It rejects unknown pricing, nonstandard service tiers, hosted tools, nontext inputs, server-side history, streaming, oversized payloads and unbounded output. Token usage settles reservations only after a known response; unknown or interrupted usage keeps the full reservation. Exhaustion stops dispatch and is not treated as a retryable provider failure. A per-job request limit includes retries. Validation database copies share the preview ledger rather than resetting the allowance.
+`agency_usage` is a persistent incremental ledger: at most $5 estimated standard-tier model usage and 15 distinct additional agencies. Before every request, the HTTP hook atomically reserves a conservative input/output upper bound. It rejects unknown pricing, nonstandard service tiers, hosted tools, nontext inputs, server-side history, streaming, oversized payloads and unbounded output. Token usage settles reservations only after a known response; unknown or interrupted usage keeps the full reservation. Exhaustion stops dispatch and is not treated as a retryable provider failure. A per-job request limit includes retries. The default preview uses its existing ledger; explicit acceptance database copies retain copied usage and use their own ledger to avoid preview writes. The older Phase 3 validation scripts explicitly share the preview ledger and must not be used for tests requiring an unchanged preview database.
 
 Costs are split into investigation, commercial review, qualification revision, outreach and outreach review as applicable. Prices are estimates from the existing dated local table, not an OpenAI invoice. This task does not grant permission to raise the limits or run another portfolio-wide assessment.
 

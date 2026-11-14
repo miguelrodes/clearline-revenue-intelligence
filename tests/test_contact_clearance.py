@@ -170,6 +170,32 @@ def test_customer_match_check_is_not_resolved_by_contact_authorization(settings,
     assert store.rows("SELECT * FROM investigation_resolutions WHERE task_id='match-check'") == []
 
 
+def test_operational_findings_do_not_require_unrelated_contact_authorization(settings, store, opportunity):
+    add_task(store, 'example', 'orders', 'Extend existing disposition task: SO-102281',
+             'Review internal records and record the authorized next step; contact is not required.')
+    add_task(store, 'example', 'interaction', 'Reconcile the October 24 interaction with the undated purchasing-handoff note',
+             'This is not a task to solicit a new contact from the customer.')
+    add_task(store, 'example', 'recipient', 'Complete recipient-authorization task',
+             'Permission to contact this customer is missing.')
+    add_task(store, 'example', 'permission', 'Verify and record permission for Kansas supply-planning clarification',
+             'Exact authorized recipient and routing evidence are required.')
+    api = api_for(settings)
+    tasks = {task['id']: task for task in api.get('/api/accounts/example/commercial-work').json()['tasks']}
+    assert not tasks['orders']['contact_check']
+    assert not tasks['interaction']['contact_check']
+    assert tasks['recipient']['contact_resolvable']
+    assert tasks['permission']['contact_resolvable']
+    assert api.post('/api/accounts/example/contact-clearance', json=verified_payload('orders')).status_code == 409
+    for task_id in ('orders', 'interaction'):
+        response = api.post(f'/api/investigations/{task_id}/resolve', json={'resolution': 'Synthetic test: internal owner confirmed closure in the referenced internal record.'})
+        assert response.status_code == 200, response.text
+    assert api.post('/api/investigations/recipient/resolve', json={'resolution': 'Contact was found.'}).status_code == 409
+    assert api.post('/api/investigations/permission/resolve', json={'resolution': 'Contact was found.'}).status_code == 409
+    assert store.rows('SELECT * FROM contact_authorizations') == []
+    assert store.rows('SELECT * FROM approvals') == []
+    assert store.rows('SELECT * FROM outbox') == []
+
+
 def test_saved_contact_note_invalidates_draft_that_used_older_context(settings, store, opportunity, draft):
     from clearline.reporting import valid_draft
 

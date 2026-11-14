@@ -50,8 +50,18 @@ class ApplicationService(BusinessAccess):
             if workflow != 'recovery':
                 raise ValueError('Operational queues apply to recovery accounts only')
             from .briefing import operational_queue
-            return operational_queue(self.store, queue)
-        return opportunities(self.store, workflow)
+            rows = operational_queue(self.store, queue)
+        else:
+            rows = opportunities(self.store, workflow)
+        if workflow == 'recovery':
+            from .account_profile import account_profiles
+            accounts = self.store.rows("SELECT id,name,state,account_key,holds,evidence FROM opportunities WHERE active=1 AND workflow='recovery'")
+            for account in accounts:
+                account['evidence'] = json.loads(account['evidence'])
+                account['holds'] = json.loads(account['holds'])
+            profiles = account_profiles(self.store, self.settings, accounts)
+            rows = [{**row, 'organization_profile': profiles[row['id']]} for row in rows]
+        return rows
 
     def work(self):
         from .workbench import work_groups
@@ -155,6 +165,9 @@ class ApplicationService(BusinessAccess):
 
     def detail(self, oid: str):
         opp = self.account(oid)
+        if opp['workflow'] == 'recovery':
+            from .account_profile import account_profiles
+            opp = {**opp, 'organization_profile': account_profiles(self.store, self.settings, [opp])[oid]}
         drafts = self.store.rows('SELECT * FROM drafts WHERE opportunity_id=? ORDER BY version DESC', (oid,))
         from .draft_revision import manual_reviewable
         revisions={json.loads(j['payload']).get('draft_id'):j['status'] for j in self.store.rows("SELECT payload,status FROM jobs WHERE opportunity_id=? AND kind='revise_draft' ORDER BY created_at,rowid",(oid,))}

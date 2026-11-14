@@ -3,6 +3,8 @@ import Link from 'next/link';
 import {useSearchParams} from 'next/navigation';
 import {useState,useRef,useEffect,type ReactNode} from 'react';
 import {useApi,request,refresh,money,number,time,label} from '@/lib/api';
+import {actionDescription} from '@/lib/account-presentation';
+import type {Overview} from '@/lib/types';
 import {RecommendedActionRow} from '@/components/recommended-action';
 
 type Execution={api_blocked?:{code:string;message:string}|null;active_investigations:{id:string;kind:string;account_name:string;started_at:string}[];model_requests_inflight:number;queue_ready:number;retry_wait:number;jobs:Record<string,number>;average_seconds:number|null;recommendations_per_minute_5m:number;model_requests:number;input_tokens:number;output_tokens:number;estimated_cost_usd:number|null;unpriced_records:number;capacity:{active_limit:number;configured_max:number;cooldown_seconds:number;peak_investigations:number}|null;batches:{id:string;total:number;counts:Record<string,number>}[]};
@@ -28,9 +30,17 @@ export function ExecutionPanel(){
 }
 
 type BriefMember={id:string;name:string;href:string;task:string;historical_decline_cents?:number|null;due_at?:string|null;subject?:string|null;last_sent_at?:string|null};
-type Briefing={brief:{summary:string;summary_points?:string[];priority_items?:{action_id:string;title:string;text:string}[];created_at:string;actions:{id:string;title:string;why:string;href:string;accounts:number;historical_decline_cents:number|null;button_label?:string;scope_label?:string;financial_cents?:number|null;financial_label?:string;urgency?:string|null;recommended_order?:number;time_priority?:number;earliest_due_at?:string|null;members?:BriefMember[];team?:string|null}[]}|null;stale:boolean;last_generated_at:string|null;job:{status:string;error:string|null}|null};
+type BriefPriority={title:string;text:string;action_id?:string;revenue_context?:{historical_decline_cents:number;accounts:number;excludes_distributors:boolean}};
+type Briefing={brief:{summary:string;summary_points?:string[];priority_items?:BriefPriority[];created_at:string;actions:{id:string;title:string;why:string;href:string;accounts:number;historical_decline_cents:number|null;button_label?:string;scope_label?:string;financial_cents?:number|null;financial_label?:string;urgency?:string|null;recommended_order?:number;time_priority?:number;earliest_due_at?:string|null;members?:BriefMember[];team?:string|null}[]}|null;stale:boolean;last_generated_at:string|null;job:{status:string;error:string|null}|null};
+function BriefRevenue({point}:{point:BriefPriority}){
+ const context=point.revenue_context;
+ if(!context||context.historical_decline_cents<=0||/\$/.test(point.text))return null;
+ const amount=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',notation:'compact',maximumFractionDigits:context.historical_decline_cents>=100000000?2:0}).format(context.historical_decline_cents/100);
+ const detail=`${money(context.historical_decline_cents)} historical purchasing decline across ${context.accounts} customer accounts in this group.${context.excludes_distributors?' Distributor totals are excluded to avoid double counting.':''} This is the purchasing gap to investigate, not a forecast of recoverable or new revenue. Groups may overlap; do not add their amounts.`;
+ return <span className="brief-revenue-context" title={detail}> — <strong>{amount}</strong> historical decline{context.excludes_distributors?' (excl. distributors)':''}.</span>;
+}
 export function OperationalBriefing({phaseOneOnly=true}:{phaseOneOnly?:boolean}={}){
- const {data,error}=useApi<Briefing>('/brief');const [message,setMessage]=useState('');const [busy,setBusy]=useState(false);
+ const {data,error}=useApi<Briefing>('/brief');const {data:overview}=useApi<Overview>('/overview');const [message,setMessage]=useState('');const [busy,setBusy]=useState(false);
  const pending=data?.job&&['queued','running'].includes(data.job.status);
  const [sort,setSort]=useState('recommended');const listRef=useRef<HTMLOListElement>(null);const [listHeight,setListHeight]=useState<number>();
  const allActions=data?.brief?.actions||[];
@@ -39,14 +49,14 @@ export function OperationalBriefing({phaseOneOnly=true}:{phaseOneOnly?:boolean}=
  useEffect(()=>{listRef.current?.scrollTo?.({top:0,behavior:'smooth'})},[sort]);
  return <section className="operational-brief" aria-label="AI operational briefing">
  <div className="brief-heading"><h1>Overview Brief</h1><small>{data?.last_generated_at?`Last updated ${time(data.last_generated_at)}`:data?.brief?`Last updated ${time(data.brief.created_at)}`:''}</small></div>
- {data?.brief&&<ul className="brief-summary brief-summary-points" aria-label="Overview brief priorities">{(data.brief.priority_items?.length?data.brief.priority_items:(data.brief.summary_points?.length?data.brief.summary_points:[data.brief.summary]).map(text=>({title:"",text}))).slice(0,5).map((point,i)=><li key={i}>{point.title&&<><strong>{point.title}</strong>{": "}</>}{point.text}</li>)}</ul>}
+ {data?.brief&&<ul className="brief-summary brief-summary-points" aria-label="Overview brief priorities" tabIndex={0}>{(data.brief.priority_items?.length?data.brief.priority_items:(data.brief.summary_points?.length?data.brief.summary_points:[data.brief.summary]).map(text=>({title:"",text}))).slice(0,5).map((point,i)=><li key={i}>{point.title&&<><strong>{point.title}</strong>{": "}</>}{point.text}<BriefRevenue point={point}/></li>)}</ul>}
  <div className="brief-actions-header"><h2>Recommend Actions</h2><div className="brief-controls"><select aria-label="Sort recommended actions" value={sort} onChange={e=>setSort(e.target.value)}><option value="recommended">Recommended</option><option value="revenue">Revenue impact</option><option value="time">Time-sensitive</option></select>
  <button className="action-link" disabled={busy||Boolean(pending)} onClick={async()=>{setBusy(true);try{await request('/brief','POST');setMessage('Updating your priorities…');refresh()}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}}}>{pending?'Updating…':'Refresh briefing'}</button></div>
  </div>
  {error?<p className="brief-summary" role="alert">{error}</p>:data?.brief?<>
 
  {actions.length?<ol ref={listRef} className="brief-actions" aria-label="Prioritized recommendations" tabIndex={0} style={{maxHeight:listHeight}}>{actions.map(a=><li key={a.id}>
- <RecommendedActionRow title={a.title} description={a.why} href={a.href.startsWith('/actions?group=')?`${typeof window!=='undefined'&&window.location.pathname==='/'?'/':'/actions'}?${a.href.split('?')[1]}`:a.href} buttonLabel={a.button_label||'Open'} financialCents={a.financial_cents??a.historical_decline_cents} financialLabel={a.financial_label?.startsWith('Historical purchasing decline associated')?'Historical decline · customer records need verification':a.financial_label} scopeLabel={`${a.scope_label||`${a.accounts} customer${a.accounts===1?'':'s'}`}${a.team?` · ${a.team}`:''}`}>
+ <RecommendedActionRow title={a.title} description={actionDescription(a,overview?.summary?.as_of)} href={a.href.startsWith('/actions?group=')?`${typeof window!=='undefined'&&window.location.pathname==='/'?'/':'/actions'}?${a.href.split('?')[1]}`:a.href} buttonLabel={a.button_label||'Open'} financialCents={a.financial_cents??a.historical_decline_cents} financialLabel={a.financial_label?.startsWith('Historical purchasing decline associated')?'Historical decline · customer records need verification':a.financial_label} scopeLabel={`${a.scope_label||`${a.accounts} customer${a.accounts===1?'':'s'}`}${a.team?` · ${a.team}`:''}`}>
  {a.earliest_due_at?<small>Next follow-up: {time(a.earliest_due_at)}</small>:a.urgency&&<small>{a.urgency}</small>}
  {!!a.members?.length&&<details className="brief-members"><summary>View {a.accounts} customer{a.accounts===1?'':'s'}</summary><div className="brief-member-list">{a.members.map((m,j)=><div className="brief-member" key={`${m.id}-${j}`}><Link className="text-link" href={m.href}>{m.name}</Link><p>{m.task}</p>{m.subject&&<p>{m.last_sent_at?'Previous email':'Prepared email'}: {m.subject}</p>}<small>{m.due_at&&<>Scheduled {time(m.due_at)} · </>}{m.last_sent_at&&<>Last sent {time(m.last_sent_at)} · </>}{(m.historical_decline_cents??0)>0&&<><strong>{money(m.historical_decline_cents!)}</strong> historical purchasing decline</>}</small></div>)}</div></details>}
  </RecommendedActionRow></li>)}</ol>:<p className="brief-summary">No Phase 1 customer-recovery actions need attention right now.</p>}
