@@ -134,15 +134,23 @@ def detail(store,aid):
     row['jobs']=store.rows("SELECT id,status,error,attempts FROM jobs WHERE kind='agency_qualify' AND json_extract(payload,'$.agency_id')=? AND json_extract(payload,'$.evidence_hash')=? ORDER BY created_at DESC,rowid DESC LIMIT 3",(aid,row['evidence_hash']))
     return row
 
+def search_state(value):
+    from .account_profile import STATES
+    term=value.strip().casefold()
+    if term=='district of columbia':return 'DC'
+    return next((code for code,name in STATES.items() if term in (code.casefold(),name.casefold())),None)
+
 def listing(store,q='',classification='',outcome='',sort='priority',offset=0,limit=50):
     if classification and classification not in CATEGORIES:raise ValueError('Unknown classification')
-    if outcome and outcome not in OUTCOMES+('not_assessed','queued','failed','needs_reassessment','accepted','held','rejected'):raise ValueError('Unknown qualification status')
+    if outcome and outcome not in OUTCOMES+('not_assessed','queued','failed','needs_reassessment','accepted','held','rejected','any_rejection','qualification_reject'):raise ValueError('Unknown qualification status')
     if sort not in ('priority','name','state') or not 1<=limit<=100 or offset<0:raise ValueError('Invalid sort or page size')
     rows=store.rows("""SELECT a.*, ar.score,ar.explanation ranking,aw.decision user_decision,aw.rationale,aw.information,aw.stage,
     (SELECT result FROM agency_qualifications r WHERE r.agency_id=a.id AND r.evidence_hash=a.evidence_hash ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1) assessment,
     (SELECT status FROM jobs j WHERE j.kind='agency_qualify' AND json_extract(j.payload,'$.agency_id')=a.id AND json_extract(j.payload,'$.evidence_hash')=a.evidence_hash ORDER BY j.created_at DESC,j.rowid DESC LIMIT 1) job_status
     FROM agency_screenings a LEFT JOIN agency_rankings ar ON ar.agency_id=a.id LEFT JOIN agency_workflow aw ON aw.agency_id=a.id WHERE active=1""")
     items=[]
+    query=q.strip().casefold()
+    state=search_state(query)
     from .screening_workflow import activity_revisions
     activity=activity_revisions(store)
     for r in rows:
@@ -151,24 +159,44 @@ def listing(store,q='',classification='',outcome='',sort='priority',offset=0,lim
         h=context_hash(r['evidence_hash'],json.loads(r.pop('information') or '{}'),activity.get(r['id']))
         if a and (a.get('context_hash',r['evidence_hash'])!=h or a.get('qualification_engine',QUALIFICATION_ENGINE)!=QUALIFICATION_ENGINE):r['qualification_status']='needs_reassessment'
         r['user_decision']=r['user_decision'] or 'new';r['ranking']=json.loads(r['ranking'] or 'null')
-        if r['user_decision']=='rejected' and outcome!='rejected':continue
-        if q.lower() not in (r['name']+' '+r['state']+' '+e['agency'][0]['city']).lower() or (classification and r['classification']!=classification) or (outcome and outcome not in (r['qualification_status'],r['user_decision'])):continue
+        if r['user_decision']=='rejected' and outcome not in ('rejected','any_rejection','qualification_reject'):continue
+        if classification and r['classification']!=classification:continue
+        if outcome=='any_rejection':
+            if r['qualification_status']!='reject' and r['user_decision']!='rejected':continue
+        elif outcome=='qualification_reject':
+            if r['qualification_status']!='reject':continue
+        elif outcome and outcome not in (r['qualification_status'],r['user_decision']):continue
+        name=r['name'].casefold()
+        city=(e['agency'][0].get('city') or '').casefold()
+        if state:
+            if r['state']!=state:continue
+            r['matched_on']='state'
+        elif query:
+            if query in name:r['matched_on']='name'
+            elif query in city:r['matched_on']='city'
+            else:continue
         r.update(product_fit=e['fit_hypothesis_skus'],ranking_reason=e['ranking_reason'],source_refs=[x['ref'] for x in e['agency']],next_action=a['decision']['next_task'] if a else e['classification_reason'],review_passed=a['review_passed'] if a else None)
         if r['user_decision'] in ('held','rejected'):r['next_action']=('On hold: ' if r['user_decision']=='held' else 'Discarded: ')+(r['rationale'] or '')
         elif r['stage'] and r['stage']!='not_contacted':r['next_action']='Review recorded '+r['stage'].replace('_',' ')+' activity before any further outreach.'
         items.append(r)
     if sort=='priority':items.sort(key=lambda r:(0 if r['ranking'] and r['ranking']['eligible'] and r['user_decision'] not in ('held','rejected') and r['stage'] in (None,'not_contacted') and r['qualification_status'] not in ('reject','defer') else 1,-(r['score'] or 0),r['name'],r['id']))
     else:items.sort(key=lambda r:(r[sort],r['name'],r['id']))
+    if query and not state and sort=='priority':
+        items.sort(key=lambda r:(r['matched_on']!='name',r['name'].casefold()!=query))
     return dict(items=items[offset:offset+limit],total=len(items),offset=offset,limit=limit)
 
-def summary(store):
-    runs=store.rows('SELECT summary FROM agency_screening_runs ORDER BY created_at DESC,rowid DESC LIMIT 1')
-    result=json.loads(runs[0]['summary']) if runs else {'source_records':0,'unique_records':0,'classifications':{}}
+def current_reports(store):
     # SQL counts only current accepted-or-explicitly-held reports, never stale reports.
     reports=store.rows("""SELECT a.id,r.result,a.evidence_hash,aw.information FROM agency_qualifications r JOIN agency_screenings a ON a.id=r.agency_id AND a.evidence_hash=r.evidence_hash AND a.active=1 LEFT JOIN agency_workflow aw ON aw.agency_id=a.id WHERE r.rowid=(SELECT r2.rowid FROM agency_qualifications r2 WHERE r2.agency_id=a.id AND r2.evidence_hash=a.evidence_hash ORDER BY created_at DESC,rowid DESC LIMIT 1)""")
     from .screening_workflow import context_hash,activity_revisions
     activity=activity_revisions(store)
     reports=[r for r in reports if json.loads(r['result']).get('context_hash',r['evidence_hash'])==context_hash(r['evidence_hash'],json.loads(r['information'] or '{}'),activity.get(r['id'])) and json.loads(r['result']).get('qualification_engine',QUALIFICATION_ENGINE)==QUALIFICATION_ENGINE]
+    return reports
+
+def summary(store):
+    runs=store.rows('SELECT summary FROM agency_screening_runs ORDER BY created_at DESC,rowid DESC LIMIT 1')
+    result=json.loads(runs[0]['summary']) if runs else {'source_records':0,'unique_records':0,'classifications':{}}
+    reports=current_reports(store)
     result['qualification_counts']=dict(Counter(json.loads(r['result'])['decision']['outcome'] for r in reports));result['assessed']=len(reports);result['limits']=LIMITS
     rejected={r['id'] for r in reports if json.loads(r['result'])['decision']['outcome']=='reject'}
     held={r['id'] for r in reports if json.loads(r['result'])['decision']['outcome']=='defer'}

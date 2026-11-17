@@ -52,7 +52,10 @@ async def execute_job(store,settings,job,analyst=analyze,capacity=None):
     start=time.monotonic(); started_at=utcnow(); status='failed'; concurrency=capacity.current if capacity else 1
     store.event('job_started',{'kind':job['kind'],'concurrency':concurrency},job['id'],job['opportunity_id'])
     try:
-        if job['kind']=='agency_qualify':
+        if job['kind'] in ('pipeline_discover','pipeline_research','pipeline_qualify'):
+            from .prospect_discovery import execute
+            await execute(store,job,settings)
+        elif job['kind']=='agency_qualify':
             from .screening_agent import qualify
             from .screening import save_result
             save_result(store,job,await qualify(store,job,settings))
@@ -93,10 +96,11 @@ async def execute_job(store,settings,job,analyst=analyze,capacity=None):
             store.save_analysis(job,await draft_reply(store,job,settings))
         elif job['kind']=='deliver': store.deliver(job,settings.followup_days)
         elif job['kind']=='followup':
-            opp=store.opportunity(job['opportunity_id'])
-            if opp['status']!='awaiting_response' or not opp['active']:
+            if not store.enqueue_due_followup(job):
                 status='cancelled'; store.finish(job['id'],status,'Follow-up no longer appropriate'); return
-            store.queue_analysis(opp['id'],job['payload']['parent_draft_id'],investigation=True,allow_simulation=True)
+        elif job['kind']=='review_sent':
+            from .sent_review import review_sent
+            await review_sent(store,job,settings)
         elif job['kind']=='revise_draft':
             from .draft_revision import run_revision
             await run_revision(store,job,settings)
@@ -171,7 +175,7 @@ def run_one(store,settings,analyst=analyze):
     if not job: return False
     asyncio.run(execute_job(store,settings,job,analyst));return True
 
-async def run_pool(store,settings,analyst=analyze,drain=False,auto_brief=True,kinds=None):
+async def run_pool(store,settings,analyst=analyze,drain=False,auto_brief=True,kinds=None,preview_delivery=False):
     from .operations import queue_brief
     capacity=Capacity(settings); active=set(); stopping=False; last_brief=0.; last_capacity=0.; last_coverage=0.; last_sources=0.
     def stop():
@@ -186,13 +190,24 @@ async def run_pool(store,settings,analyst=analyze,drain=False,auto_brief=True,ki
             for task in active:
                 if task.done(): task.result()
             active={t for t in active if not t.done()}
-            if not stopping and not store.paused():
+            paused=store.paused()
+            if not stopping and paused and preview_delivery and not active and store.delivery_only():
+                # Recheck the mode and enforce the two simulated job kinds in the claim transaction.
+                job=store.claim(preview_mode='delivery')
+                if job:
+                    await execute_job(store,settings,job)
+                    continue
+            if not stopping and not paused:
                 if kinds is None:store.tick()
                 if time.monotonic()>=capacity.cooldown:
                     while len(active)<capacity.current:
                         blocked=bool(store.rows("SELECT 1 FROM controls WHERE name='api_blocked'"))
-                        if blocked and kinds is not None:break
-                        job=store.claim(['scan','deliver','followup'] if blocked else kinds)
+                        eligible=kinds
+                        if blocked:
+                            eligible=([kind for kind in kinds if kind in ('deliver','agency_deliver')]
+                                      if kinds is not None else ['scan','deliver','followup'])
+                            if not eligible:break
+                        job=store.claim(eligible,preview_mode='general') if preview_delivery else store.claim(eligible)
                         if not job: break
                         active.add(asyncio.create_task(execute_job(store,settings,job,analyst,capacity)))
                 actual=store.rows("SELECT COUNT(*) n FROM jobs WHERE status='running' AND kind IN ('analyze','prepare','prospect_research','prospect_qualify','reply','revise_draft')")[0]['n']

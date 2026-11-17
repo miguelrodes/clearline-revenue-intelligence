@@ -159,13 +159,15 @@ it('opens Lone Tree contact evidence and saves a partial note directly in the cl
  vi.stubGlobal('fetch',fetcher);
  render(<GroupReview id="investigation:contacts"/>);
  fireEvent.click(await screen.findByRole('button',{name:'Review contact details'}));
- expect(await screen.findByRole('heading',{name:'ID DOC – Lone Tree'})).toBeInTheDocument();
+ expect(await screen.findByRole('heading',{level:2,name:'ID DOC – Lone Tree'})).toBeInTheDocument();
  expect(screen.getByText('Captain retired - new contact TBD.')).toBeInTheDocument();
  expect(screen.getByText(/The CRM says the captain retired/)).toBeInTheDocument();
- fireEvent.change(screen.getByLabelText('Contact name'),{target:{value:'Purchasing office'}});
+ fireEvent.change(screen.getByLabelText('Work email'),{target:{value:'buyer@example.test'}});
  fireEvent.click(screen.getByRole('button',{name:'Save partial information'}));
  await waitFor(()=>expect(fetcher.mock.calls.some(([path,options])=>path==='/api/accounts/lone-tree/contact-clearance'&&options?.method==='POST')).toBe(true));
- expect(screen.getByRole('button',{name:'Close contact review'})).toBeInTheDocument();
+ const review=screen.getByRole('button',{name:'Review contact details'});
+ expect(review).toHaveAttribute('aria-expanded','true');fireEvent.click(review);
+ expect(review).toHaveAttribute('aria-expanded','false');
 });
 
 it('keeps a reviewed soft-warning action and a pending human edit visible without reintroducing the old hold instruction',async()=>{
@@ -175,7 +177,55 @@ it('keeps a reviewed soft-warning action and a pending human edit visible withou
  render(<AccountSummary id="juniper"/>);
  expect((await screen.findAllByText(objective)).length).toBeGreaterThan(0);
  expect(screen.getByRole('textbox',{name:'Message'})).toHaveValue('Could a training discussion help?');
- expect(screen.getByText('The agent is checking your edited email. Approval will be available after review.')).toBeInTheDocument();
+ expect(screen.getByText('An agent is working on your requested rewrite.')).toBeInTheDocument();
  expect(screen.queryByRole('button',{name:'Approve simulated send'})).not.toBeInTheDocument();
  expect(screen.queryByRole('link',{name:'Review the prepared information request'})).not.toBeInTheDocument();
+});
+
+it('keeps the organization, pending request and expandable checks together under each account',async()=>{
+ const members=[
+  {id:'range',name:'Range Line Distributors',task_id:'fulfillment',decline_cents:2000,inquiry_state:'status_requested'},
+  {id:'juniper',name:'Juniper Hills',task_id:'order',decline_cents:1100}
+ ];
+ const accounts=[
+  {id:'range',organization_profile:{description:'Distributor with documented purchases from Clearline.'}},
+  {id:'juniper',organization_profile:{description:'Correctional facility in Kansas.'}}
+ ];
+ vi.stubGlobal('fetch',vi.fn(async path=>({ok:true,json:async()=>path==='/api/work'
+  ?{groups:[{id:'investigation:orders',title:'Check open orders and credits',why:'Verify order status.',kind:'accounts',members}]}
+  :path==='/api/opportunities'?accounts:{tasks:[],practical_actions:[],signals:{signals:[]},authorizations:[],contact_clearance:null,inquiry_data:{recipients:[],inquiries:[]}}})));
+ render(<GroupReview id="investigation:orders"/>);
+ const range=(await screen.findByRole('heading',{name:'Range Line Distributors'})).closest('article')!;
+ const juniper=screen.getByRole('heading',{name:'Juniper Hills'}).closest('article')!;
+ expect(within(range).getByText(accounts[0].organization_profile.description)).toBeVisible();
+ expect(within(range).getByText(/request sent · awaiting response/i)).toBeVisible();
+ expect(within(juniper).queryByText(/request sent/i)).toBeNull();
+ const button=within(range).getByRole('button',{name:'Review checks'});
+ fireEvent.click(button);
+ const contents=await within(range).findByRole('region',{name:'Checks for Range Line Distributors'});
+ expect(document.getElementById(button.getAttribute('aria-controls')!)).toContainElement(contents);
+ expect(within(juniper).getByRole('button')).toHaveAttribute('aria-expanded','false');
+ fireEvent.click(button);
+ expect(button).toHaveAttribute('aria-expanded','false');
+ expect(contents).not.toBeInTheDocument();
+ expect(vi.mocked(fetch).mock.calls.every(call=>call[1]?.method==='GET')).toBe(true);
+});
+
+it('follows a verification link on a standalone account without opening another account dialog',async()=>{
+ state.path='/accounts/range';
+ window.history.replaceState({},'',state.path);
+ const action={id:'fulfillment:range',title:'Check order status',found:'An order is open.',why:'Confirm whether support is needed.',next_step:'Check the order with fulfillment.',category:'orders',role:'Fulfillment',role_key:'fulfillment',control:'finding',tasks:[{id:'t',title:'Check the order',question:'Was it shipped?',record_refs:[],record_ids:[]}],task_ids:['t'],lines:[],can_prepare_internal:true};
+ const account={id:'range',name:'Range Line',workflow:'recovery',status:'internal_investigation',evidence:{prior_cents:100,current_cents:50},assessment:null,holds:[],drafts:[],outbox:[],outcomes:[]};
+ const work={signals:{signals:[]},tasks:[],authorizations:[],contact_clearance:null,practical_actions:[action],inquiry_data:{inquiries:[],recipients:[]}};
+ vi.stubGlobal('fetch',vi.fn(async path=>({ok:true,json:async()=>path==='/api/accounts/range'?account:path==='/api/accounts/range/commercial-work'?work:path==='/api/accounts/range/conversation'?{status:'not_started',messages:[],context:{},tasks:[]}:path==='/api/health'?{alive:true}:path==='/api/execution'?{active_investigations:[]}:[]})));
+ try{
+  render(<Workspace/>);
+  const link=await screen.findByRole('link',{name:'Complete this in What Needs Verification'});
+  const check=screen.getByRole('article',{name:action.title});
+  check.scrollIntoView=vi.fn();
+  fireEvent.click(link);
+  expect(check.scrollIntoView).toHaveBeenCalledOnce();
+  expect(document.activeElement).toBe(check);
+  expect(state.push).not.toHaveBeenCalled();
+ }finally{window.history.replaceState({},'','/')}
 });

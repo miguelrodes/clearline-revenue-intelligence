@@ -61,9 +61,9 @@ def test_allowed_jobs_are_consumed_but_portfolio_and_phase4_are_not(
     store, settings, monkeypatch
 ):
     expected = {
-        'analyze', 'prepare', 'reply', 'revise_draft', 'followup', 'deliver',
+        'analyze', 'prepare', 'reply', 'revise_draft', 'review_sent', 'followup', 'deliver',
         'revenue_brief', 'agency_scan', 'agency_qualify', 'agency_outreach',
-        'agency_deliver',
+        'agency_deliver', 'pipeline_discover', 'pipeline_research', 'pipeline_qualify',
     }
     assert set(preview.PREVIEW_JOB_KINDS) == expected
     ids = {kind: store.enqueue(kind, {}) for kind in expected}
@@ -149,3 +149,52 @@ def test_existing_customer_and_agency_dispatch_with_manual_brief(
     assert len(store.rows('SELECT * FROM drafts')) == 1
     assert not store.rows('SELECT * FROM approvals')
     assert not store.rows('SELECT * FROM outbox')
+
+
+def test_paused_delivery_only_uses_exact_approval_and_leaves_other_work_queued(store, settings, draft):
+    with pytest.raises(ValueError, match='Pause'):
+        store.set_delivery_only(True)
+    store.set_paused(True)
+    store.decide(draft['id'], True)
+    other_ids = [store.enqueue(kind, {}) for kind in ('analyze', 'reply', 'review_sent', 'pipeline_research', 'followup')]
+    store.schedule(1)
+    with store.connect(write=True) as con:
+        con.execute("UPDATE schedules SET next_run='2000-01-01'")
+        con.execute("INSERT INTO controls VALUES('api_blocked','fixture')")
+    schedule = store.rows('SELECT * FROM schedules')
+    preview.run_preview_worker(store, settings, drain=True)
+    assert not store.rows('SELECT * FROM outbox')
+    assert store.rows("SELECT status FROM jobs WHERE kind='deliver'") == [{'status': 'queued'}]
+    store.set_delivery_only(True)
+    with pytest.raises(ValueError, match='Turn off'):
+        store.set_paused(False)
+    assert store.claim(preview_mode='general') is None
+    preview.run_preview_worker(store, settings, drain=True)
+    preview.run_preview_worker(store, settings, drain=True)
+    assert store.rows('SELECT draft_id,delivery_mode FROM outbox') == [{'draft_id': draft['id'], 'delivery_mode': 'simulated'}]
+    assert store.rows("SELECT status,attempts FROM jobs WHERE kind='deliver'") == [{'status':'completed','attempts':1}]
+    for jid in other_ids:
+        assert store.rows('SELECT status,attempts FROM jobs WHERE id=?', (jid,)) == [{'status':'queued','attempts':0}]
+    assert store.rows('SELECT * FROM schedules') == schedule
+    store.set_delivery_only(False)
+    assert store.paused() and store.claim(preview_mode='delivery') is None
+
+
+def test_reclaimed_job_reports_persisted_attempt_state(store):
+    jid = store.enqueue('analyze', {})
+    with store.connect(write=True) as con:
+        con.execute("UPDATE jobs SET finished_at='old time',error='old failure' WHERE id=?", (jid,))
+    job = store.claim(['analyze'], preview_mode='general')
+    saved = store.rows('SELECT status,started_at,finished_at,attempts,error FROM jobs WHERE id=?', (jid,))[0]
+    assert saved == {key: job[key] for key in saved}
+    assert saved['status'] == 'running' and saved['attempts'] == 1 and saved['finished_at'] is None
+
+
+def test_explicit_worker_can_deliver_during_a_model_block(store, settings, draft):
+    store.decide(draft['id'], True)
+    jid=store.enqueue('analyze', {})
+    with store.connect(write=True) as con:
+        con.execute("INSERT INTO controls VALUES('api_blocked','fixture')")
+    preview.run_preview_worker(store, settings, drain=True)
+    assert store.rows('SELECT draft_id FROM outbox') == [{'draft_id': draft['id']}]
+    assert store.rows('SELECT status,attempts FROM jobs WHERE id=?',(jid,)) == [{'status':'queued','attempts':0}]

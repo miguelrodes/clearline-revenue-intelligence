@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 from clearline.api import create_app
 from clearline.services import ApplicationService
 from clearline.contracts import CampaignInput,BatchInput,DraftInput
+from test_internal_inquiries import internal, SYNTHETIC_ROUTE, PATH
+from test_prospecting import bundle, research, prospect, report
 
 TOKEN='test-only-'+('x'*40)
 
@@ -42,13 +44,173 @@ def test_local_auth_fails_closed(client,monkeypatch):
 
 def test_tool_read_parity_and_pagination(client,settings,draft):
     s=ApplicationService(settings)
-    assert data(call(client,'get_brief'))==s.operational_brief()
+    assert data(call(client,'get_brief',{'view':'saved_brief'}))==s.operational_brief()
+    assert data(call(client,'get_brief'))==s.daily_priorities()
     assert data(call(client,'query_accounts',{'limit':1}))['items'][0]['id']=='example'
     assert data(call(client,'get_account',{'account_id':'example','section':'evidence'}))['evidence']==s.account('example')['evidence']
     assert data(call(client,'get_draft',{'draft_id':draft['id']}))['body']==draft['body']
     assert data(call(client,'list_actions'))['counts']==s.work()['counts']
     assert call(client,'query_accounts',{'limit':101})['isError']
     assert call(client,'get_account',{'account_id':'missing'})['isError']
+
+def test_daily_priorities_include_only_current_prospect_draft(client,store,prospect,research,report):
+    store.queue_prospect(prospect)
+    store.save_prospect_research(store.claim(),research)
+    store.save_analysis(store.claim(),report)
+    jobs=store.rows('SELECT id,status FROM jobs ORDER BY id')
+    first,=data(call(client,'get_brief'))['priorities']
+    assert first['id']==prospect and first['draft']['subject']==report.subject
+    actions=data(call(client,'list_actions'))
+    assert actions['priorities']==[first]
+    detail=data(call(client,'list_actions',{'group_id':first['group_id'],'limit':1}))
+    assert detail['members']['items'][0]['draft']==first['draft']
+    assert store.rows('SELECT id,status FROM jobs ORDER BY id')==jobs
+    store.decide(first['draft']['id'],False)
+    assert not data(call(client,'get_brief'))['priorities']
+    assert not data(call(client,'list_actions'))['groups']['items']
+
+def test_internal_inquiry_moves_from_review_to_wait_to_partial_findings(client,internal):
+    draft=internal.post(PATH,json={'group_id':'fulfillment',**SYNTHETIC_ROUTE}).json()
+    path=PATH+'/'+draft['id']
+    assert any(p['status']=='draft_prepared' for p in data(call(client,'get_brief'))['priorities'])
+    assert internal.post(path+'/approve',json={'snapshot_hash':draft['snapshot_hash']}).status_code==200
+    sent=data(call(client,'get_brief'))
+    waiting,=sent['waiting']
+    assert set(waiting['order_ids'])=={'SO-1','SO-2','SO-3'}
+    assert draft['id'] not in {p.get('inquiry_id') for p in sent['priorities']}
+    detail=data(call(client,'list_actions',{'group_id':'verification_tasks'}))
+    assert {m['task_id'] for m in detail['members']['items']}=={'credit','contact'}
+    assert internal.post(path+'/reply',json={'body':'Synthetic fulfillment response: SO-2 shipped.'}).status_code==200
+    now=data(call(client,'list_actions'))
+    first=now['priorities'][0]
+    assert first['inquiry_id']==draft['id'] and first['status']=='response_recorded' and first['order_ids']==['SO-2']
+    assert set(now['waiting'][0]['order_ids'])=={'SO-1','SO-3'}
+
+def test_order_check_counts_follow_saved_inquiry_state_across_all_three_views(client, internal, store):
+    from clearline.evidence import ENGINE_VERSION, context_hash
+
+    # This is a temporary account with two fulfillment checks, one independent credit
+    # check and one contact check. Its evidence and saved decision stay fixed.
+    with store.connect(write=True) as con:
+        con.execute("UPDATE opportunities SET status='internal_investigation' WHERE id='example'")
+        evidence_hash = con.execute("SELECT evidence_hash FROM opportunities WHERE id='example'").fetchone()[0]
+        store.event('agent_decision', {'decision':'hold','engine_version':ENGINE_VERSION,
+                    'context_hash':context_hash(con,'example'),'evidence_hash':evidence_hash},
+                    opportunity_id='example', con=con)
+
+    # A separate customer's already-delivered message and future reminder must survive
+    # every transition. These are saved records in the fixture, not a send request.
+    from clearline.conversations import outbound_record
+    with store.connect(write=True) as con:
+        con.execute('''INSERT INTO opportunities
+            (id,account_key,name,state,decline_cents,evidence,evidence_hash,holds,status,active,updated_at,workflow)
+            SELECT 'other','other','Other buyer',state,0,evidence,evidence_hash,'[]','awaiting_response',1,updated_at,workflow
+            FROM opportunities WHERE id='example' ''')
+        con.execute('''INSERT INTO drafts VALUES('prior','other',1,?,'simulation@example.invalid',
+                    'Previous message','Previous message','simulated','{}','2026-11-01')''',(evidence_hash,))
+        con.execute('''INSERT INTO outbox VALUES('delivery','prior','other','simulation@example.invalid',
+                    'Previous message','Previous message','simulated','2026-11-01')''')
+        outbound_record(con,con.execute("SELECT * FROM outbox WHERE id='delivery'").fetchone(),
+                        con.execute("SELECT * FROM drafts WHERE id='prior'").fetchone(),backfill=True)
+        reminder = store._enqueue(con,'followup',{'parent_draft_id':'prior'},'other','existing-reminder','2099-01-01')
+    protected = {table:store.rows('SELECT * FROM '+table) for table in ('jobs','drafts','outbox','messages','approvals','outcomes')}
+
+    orders, contacts, waiting, review = ('investigation:orders','investigation:contacts','internal:waiting','internal:review')
+
+    def check_views(expected):
+        # Repeated reads exercise regeneration from current saved workflow facts.
+        for _ in range(2):
+            overview = internal.get('/api/brief').json()['brief']
+            action_rows = {g['id']:g for g in overview['actions']}
+            waiting_rows = {g['id']:g for g in overview.get('waiting',[])}
+            assert waiting not in action_rows and not action_rows.keys() & waiting_rows.keys()
+            shown = {**action_rows, **waiting_rows}
+            work = {g['id']:g for g in internal.get('/api/work').json()['groups']}
+            queue = data(call(client,'list_actions'))
+            mcp = {g['id']:g for g in queue['groups']['items']}
+            assert [(m['job_id'],m['status']) for m in queue['upcoming']] == [(reminder,'queued')]
+            assert 'followups' in work and 'followups' in mcp
+            expected = {**expected, contacts:{'contact'}}
+            all_ids = []
+            for key in (orders,contacts,waiting,review):
+                ids = expected.get(key,set())
+                for view in (shown,work,mcp):
+                    assert (key in view) == bool(ids)
+                if not ids:
+                    continue
+                assert shown[key]['accounts'] == work[key]['accounts'] == mcp[key]['accounts'] == 1
+                assert int(shown[key]['scope_label'].split()[0]) == work[key]['tasks'] == mcp[key]['tasks'] == len(ids)
+                if key == waiting:
+                    assert work[key]['status'] == mcp[key]['status'] == 'waiting'
+                detail = data(call(client,'list_actions',{'group_id':key}))
+                for members in (work[key]['members'], detail['members']['items']):
+                    assert {m['task_id'] for m in members} == ids
+                all_ids.extend(ids)
+            assert len(all_ids) == len(set(all_ids))
+
+    check_views({orders:{'one','two','credit'}})
+    draft = internal.post(PATH,json={'group_id':'fulfillment',**SYNTHETIC_ROUTE}).json()
+    check_views({orders:{'credit'}, review:{'one','two'}})
+
+    # Insert a historical delivery fixture. Neither a send operation nor a worker runs.
+    iid = draft['id']
+    with store.connect(write=True) as con:
+        con.execute("INSERT INTO internal_approvals VALUES(?,1,?,'2026-11-01')",(iid,draft['snapshot_hash']))
+        con.execute("INSERT INTO internal_deliveries VALUES(?,1,'simulated','2026-11-01')",(iid,))
+        con.execute("UPDATE internal_inquiries SET status='sent_simulated' WHERE id=?",(iid,))
+    check_views({orders:{'credit'},waiting:{'one','two'}})
+
+    # One order in the multi-order check receives a response. That check is
+    # actionable exactly once even though its other order is still outstanding.
+    with store.connect(write=True) as con:
+        con.execute("INSERT INTO internal_replies VALUES('reply',?,?,?,?)",
+                    (iid,'Synthetic status received for SO-2.',json.dumps(['SO-2']),'2026-11-02'))
+    check_views({orders:{'credit'},waiting:{'one'},review:{'two'}})
+
+    # Close and reopen the independent credit check and the fulfilled check.
+    # State is manipulated in this fixture only, avoiding a real reassessment.
+    with store.connect(write=True) as con:
+        con.execute("UPDATE investigation_tasks SET status='resolved' WHERE id IN ('one','credit')")
+    check_views({review:{'two'}})
+    with store.connect(write=True) as con:
+        con.execute("UPDATE investigation_tasks SET status='pending' WHERE id IN ('one','credit')")
+    check_views({orders:{'credit'},waiting:{'one'},review:{'two'}})
+    for table,original in protected.items():
+        assert store.rows('SELECT * FROM '+table) == original
+    assert len(store.rows('SELECT * FROM internal_deliveries')) == len(store.rows('SELECT * FROM internal_approvals')) == 1
+
+
+def test_only_live_reminder_for_latest_conversation_is_upcoming(client,store,draft):
+    store.decide(draft['id'],True)
+    job=store.claim(['deliver']);store.deliver(job);store.finish(job['id'])
+    due,=data(call(client,'get_brief'))['upcoming']
+    assert due['id']=='example' and due['status']=='queued'
+    store.cancel_job(due['job_id'])
+    assert data(call(client,'get_brief'))['upcoming']==[]
+    assert 'followups' not in {g['id'] for g in data(call(client,'list_actions'))['groups']['items']}
+    with store.connect(write=True) as con:
+        con.execute("UPDATE opportunities SET status='human_verification' WHERE id='example'")
+        for tid,title in [('r','Check the existing queued follow-up'),('p','Verify purchasing contact')]:
+            con.execute('INSERT INTO investigation_tasks VALUES(?,?,?,?,?,?,?,?,?,?)',
+                        (tid,'example','saved',title,'Sales','Synthetic check','[]',1,'pending','now'))
+    actions=data(call(client,'list_actions'))
+    groups=[g for g in actions['groups']['items'] if g['id'].startswith('investigation:') or g['id']=='verification_tasks']
+    ids={m['task_id'] for g in groups for m in data(call(client,'list_actions',{'group_id':g['id']}))['members']['items']}
+    assert 'p' in ids and 'r' not in ids
+
+def test_older_reminder_cannot_outlive_newer_customer_reply(client,store,draft):
+    store.decide(draft['id'],True)
+    job=store.claim(['deliver']);store.deliver(job);store.finish(job['id'])
+    reminder,=data(call(client,'get_brief'))['upcoming']
+    outbound=data(call(client,'get_conversation',{'account_id':'example'}))['messages'][0]
+    data(call(client,'simulate_customer_reply',{'account_id':'example','message':{
+        'reply_to':outbound['id'],'message_id':'fixture-customer-reply','body':'We have a purchasing question.'}}))
+    assert not data(call(client,'list_actions'))['upcoming']
+    # A stale queued row on an otherwise waiting account must still lose to the thread.
+    with store.connect(write=True) as con:
+        con.execute("UPDATE jobs SET status='queued' WHERE id=?",(reminder['job_id'],))
+        con.execute("UPDATE opportunities SET status='awaiting_response' WHERE id='example'")
+    assert not data(call(client,'get_brief'))['upcoming']
 
 def test_review_confirm_send_exact_once(client,store,draft):
     r=data(call(client,'review_outreach',{'draft_ids':[draft['id']]}))

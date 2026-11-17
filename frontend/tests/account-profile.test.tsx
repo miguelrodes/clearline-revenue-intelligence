@@ -13,6 +13,11 @@ it('shows identity above business situation without changing workflow controls o
  const fetch=vi.fn(async()=>({ok:true,json:async()=>a}));vi.stubGlobal('fetch',fetch);
  render(<AccountSummary id="lone-tree"/>);
  expect(await screen.findByText(profile.description)).toBeVisible();
+ const controls=await screen.findByRole('group',{name:'Customer contact actions'});
+ expect(within(controls).getByRole('button',{name:'Pause outreach'})).toBeVisible();
+ expect(within(controls).getByRole('button',{name:'Do not contact'})).toBeVisible();
+ expect(screen.getByRole('heading',{name:'Lone Tree'}).compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+ expect(controls.compareDocumentPosition(screen.getByText(profile.description)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
  const order=['Business Situation','AI Recommendation','Next Action','What Needs Verification','Customer Conversations','Full Account History'];
  for(let i=1;i<order.length;i++)expect(screen.getByRole('heading',{name:order[i-1]}).compareDocumentPosition(screen.getByRole('heading',{name:order[i]})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
  expect(screen.getByRole('region',{name:'Full Account History'})).toBeVisible();
@@ -32,4 +37,30 @@ it('filters the existing table by account type while keeping account links',()=>
  expect(screen.queryByRole('link',{name:/Lone Tree/})).not.toBeInTheDocument();
  fireEvent.change(screen.getByLabelText('Account type filter'),{target:{value:'Unknown'}});
  expect(within(screen.getByRole('table')).getByText('Unresolved record')).toBeVisible();
+});
+
+it.each([
+ ['response',{outreach_kind:'reply',reply_message_id:'incoming-1'}],
+ ['response',{reply_to:'older-inbound-outcome'}],
+ ['outreach',{outreach_kind:'initial'}],
+ ['outreach',{outreach_kind:'followup'}],
+] as const)('puts the %s editor inside Next Action and opens it only for review',async(kind,analysis)=>{
+ const draft={id:'draft-1',version:4,recipient:'buyer@example.org',subject:'Purchasing question',body:'Saved draft text.',
+  created_at:'2026-11-15',status:'awaiting_approval',can_review:true,analysis};
+ const account={id:'account',name:'Account',workflow:'recovery',status:'awaiting_approval',holds:[],evidence:{},
+  assessment:null,drafts:[draft],events:[],outcomes:[],outbox:[],jobs:[],trends:null};
+ const fetcher=vi.fn(async(_url:unknown,_opts?:RequestInit)=>({ok:true,json:async()=>account}));
+ vi.stubGlobal('fetch',fetcher);
+ render(<AccountSummary id={account.id}/>);
+ const toggle=await screen.findByText('Review personalized '+kind);
+ const next=screen.getByRole('heading',{name:'Next Action'}).closest('section')!;
+ expect(next).toContainElement(toggle);expect(toggle.closest('details')).not.toHaveAttribute('open');
+ expect(within(next).getByLabelText('Message')).not.toBeVisible();
+ fireEvent.click(toggle);
+ expect(within(next).getByRole('textbox',{name:'Message'})).toHaveValue(draft.body);
+ expect(within(next).getByRole('button',{name:'Approve simulated send'})).toBeVisible();
+ expect(within(next).queryByRole('heading',{name:/personalized/i})).toBeNull();
+ fireEvent.click(toggle);
+ expect(toggle.closest('details')).not.toHaveAttribute('open');
+ expect(fetcher.mock.calls.every(c=>c[1]?.method==='GET')).toBe(true);
 });

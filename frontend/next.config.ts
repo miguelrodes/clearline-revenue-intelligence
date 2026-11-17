@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 const config: NextConfig = {
+  distDir: process.env.CLEARLINE_NEXT_DIST_DIR || '.next',
   devIndicators: false,
   turbopack: { root: process.cwd() },
   outputFileTracingRoot: process.cwd(),

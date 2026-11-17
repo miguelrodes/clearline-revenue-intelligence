@@ -53,8 +53,19 @@ def test_stale_brief_is_hidden_after_approval_and_outcome(store,settings,opportu
     decide_campaign(store,cid,[{'draft_id':d['id'],'snapshot_hash':d['snapshot_hash']}],True)
     assert current_brief(store)['brief'] is None and current_brief(store)['stale']
     assert not any(a['id'].startswith('messages:') for a in snapshot(store)['actions'])
+    jobs_before=store.rows('SELECT * FROM jobs ORDER BY id')
+    briefs_before=store.rows('SELECT * FROM operational_briefs')
+    api=TestClient(create_app(settings))
+    live=api.get('/api/brief').json()
+    assert live['stale'] and live['job'] is None
+    assert live['brief']['source']=='live_actions' and live['brief']['created_at'] is None
+    assert [a['id'] for a in live['brief']['actions']]==[a['id'] for a in snapshot(store,human_view=True)['actions']]
+    assert not any(a['id'].startswith('messages:') for a in live['brief']['actions'])
+    assert store.rows('SELECT * FROM jobs ORDER BY id')==jobs_before
+    assert store.rows('SELECT * FROM operational_briefs')==briefs_before
     asyncio.run(run_pool(store,settings,drain=True,auto_brief=False))
     assert any(a['id']=='followups' for a in snapshot(store)['actions'])
+    assert any(a['action_id']=='followups' for a in api.get('/api/brief').json()['brief']['priority_items'])
     store.record_outcome('example','reply','Explicit test response')
     state=snapshot(store)
     assert not any(a['id']=='followups' for a in state['actions'])
@@ -250,9 +261,11 @@ def test_investigation_brief_cannot_invent_legacy_export_controls():
 
 
 def test_priority_revenue_context_deduplicates_buyers_and_excludes_distributors():
-    from clearline.briefing import priority_revenue_context
+    from clearline.briefing import priority_revenue_context,action_revenue_context
     class ReadOnlyStore:
         def rows(self,query):
+            if query.startswith('SELECT summary FROM scans'):
+                return [{'summary':json.dumps({'as_of':'2026-11-01'})}]
             assert query=='SELECT id,account_key,workflow FROM opportunities'
             return [dict(id=oid,account_key=key,workflow=workflow) for oid,key,workflow in [
                 ('buyer','CUSTOMER|example','recovery'),('growth','CUSTOMER|growing','recovery'),
@@ -260,15 +273,51 @@ def test_priority_revenue_context_deduplicates_buyers_and_excludes_distributors(
     members=[{'id':oid,'historical_decline_cents':cents} for oid,cents in [
         ('buyer',10000),('buyer',10000),('growth',-5000),('channel',90000),('prospect',50000)]]
     state={'actions':[{'id':'orders','members':members},{'id':'contacts','members':members[:1]},
-                      {'id':'no_value','members':members[2:]}]}
+                      {'id':'no_value','members':members[2:]},{'id':'distributor_only','members':[members[3]]}]}
+    before=json.dumps(state,sort_keys=True)
     items=[{'action_id':a['id']} for a in state['actions']]
-    priority_revenue_context(ReadOnlyStore(),state,items)
-    assert items[0]['revenue_context']=={'historical_decline_cents':10000,'accounts':2,'excludes_distributors':True}
-    assert items[1]['revenue_context']=={'historical_decline_cents':10000,'accounts':1,'excludes_distributors':False}
-    assert 'revenue_context' not in items[2]
+    actions=[{'id':a['id']} for a in state['actions']]
+    priority_revenue_context(ReadOnlyStore(),state,items,actions)
+    contexts={a['id']:a['revenue_context'] for a in actions}
+    assert items[0]['revenue_context']==contexts['orders']
+    assert contexts['orders']=={'historical_decline_cents':10000,'accounts':2,'excludes_distributors':True,
+        'total_accounts':4,'excluded_distributor_accounts':1,'metric':'positive_account_net_purchasing_decline',
+        'comparison':{'current_start':'2026-01-01','current_end_exclusive':'2026-11-01','prior_start':'2025-01-01','prior_end_exclusive':'2025-11-01'},'unavailable_reason':None}
+    assert contexts['contacts']['historical_decline_cents']==10000
+    assert contexts['contacts']['excluded_distributor_accounts']==0
+    assert contexts['no_value']['historical_decline_cents']==0
+    assert contexts['no_value']['unavailable_reason'] is None
+    assert contexts['distributor_only']['historical_decline_cents'] is None
+    assert 'no non-distributor' in contexts['distributor_only']['unavailable_reason']
+    assert json.dumps(state,sort_keys=True)==before  # cache inputs and AI priority order unchanged
+    # Changing only current group membership changes display context; no saved writes or hardcoded sums.
+    state['actions'][0]['members']=members[2:]
+    assert action_revenue_context(ReadOnlyStore(),state)['orders']['historical_decline_cents']==0
+    state['actions'][0]['members']=[{'id':'buyer','historical_decline_cents':27500},members[3]]
+    assert action_revenue_context(ReadOnlyStore(),state)['orders']['historical_decline_cents']==27500
+    state['actions'][0]['members']=[{'id':'buyer','historical_decline_cents':None}]
+    missing=action_revenue_context(ReadOnlyStore(),state)['orders']
+    assert missing['historical_decline_cents'] is None and 'missing for 1' in missing['unavailable_reason']
+
+
+def test_revenue_context_requires_saved_period_and_keeps_zero_distinct_from_unknown():
+    from clearline.briefing import action_revenue_context
+    class ReadOnlyStore:
+        as_of=None
+        def rows(self,query):
+            if query.startswith('SELECT summary FROM scans'):
+                return [{'summary':json.dumps({'as_of':self.as_of})}]
+            return [{'id':'buyer','account_key':'CUSTOMER|example','workflow':'recovery'}]
+    store=ReadOnlyStore();state={'actions':[{'id':'contacts','members':[{'id':'buyer','historical_decline_cents':10000}]}]}
+    context=action_revenue_context(store,state)['contacts']
+    assert context['historical_decline_cents'] is None and 'period is unavailable' in context['unavailable_reason']
+    store.as_of='2028-02-29'
+    assert action_revenue_context(store,state)['contacts']['comparison']['prior_end_exclusive']=='2027-02-28'
 
 
 def test_existing_brief_gets_revenue_context_without_new_ai_or_saved_changes(store,opportunity):
+    with store.connect(write=True) as con:
+        con.execute("UPDATE scans SET summary=?",(json.dumps({'as_of':'2026-11-01'}),))
     state=snapshot(store);output=choose(state);action=state['actions'][0]
     output['priorities']=[{'action_id':action['id'],'title':'Review customers',
                           'text':'{customers} customers need investigation; review their purchasing changes.'}]
@@ -280,5 +329,7 @@ def test_existing_brief_gets_revenue_context_without_new_ai_or_saved_changes(sto
     assert not result['stale']
     point=result['brief']['priority_items'][0]
     assert point['revenue_context']['historical_decline_cents']==store.opportunity('example')['decline_cents']
+    assert result['brief']['actions'][0]['revenue_context']==point['revenue_context']
+    assert digest(snapshot(store))==digest(state)
     assert store.rows('SELECT * FROM operational_briefs')==before
     assert store.rows('SELECT * FROM jobs')==jobs

@@ -83,51 +83,58 @@ def test_failed_revision_keeps_original_draft_and_retry_path(store,settings,oppo
     assert store.rows('SELECT status FROM jobs WHERE id=?',(job['id'],))[0]['status']=='queued'
 
 
-def test_manual_soft_edit_is_visible_debounced_and_approval_waits_for_fresh_qa(store,opportunity,decision):
+def test_human_edits_review_only_the_delivered_version(store,settings,opportunity,decision,monkeypatch):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from clearline.conversations import conversation
     from test_intelligence import assessed
-    from clearline.action_policy import proposal_fingerprint
-    from clearline.draft_revision import current_draft
-    from clearline.workbench import ready_messages
-    from clearline.reporting import valid_draft
-    j,a=assessed(store,opportunity,decision,['known_distributor_channel'],'channel_support');save_reviewed_fixture(store,j,a)
-    old=store.rows('SELECT * FROM drafts')[0]
-    first=store.revise_draft(old['id'],old['recipient'],old['subject'],'Would a short refresher be useful?')
-    second=store.revise_draft(first,old['recipient'],old['subject'],'Would a short refresher on screening procedures help your team?')
-    jobs=store.rows("SELECT * FROM jobs WHERE kind='revise_draft' ORDER BY created_at,rowid")
-    assert [j['status'] for j in jobs]==['cancelled','queued']
-    assert jobs[1]['due_at']>jobs[1]['created_at']
-    d=store.rows('SELECT * FROM drafts WHERE id=?',(second,))[0]
-    assert not valid_draft(store,d)
-    assert [m['draft']['id'] for m in ready_messages(store)]==[second]
-    with pytest.raises(ValueError):store.decide(second,True)
-    with store.connect(write=True) as c:c.execute("UPDATE jobs SET due_at='2000-01-01' WHERE id=?",(jobs[1]['id'],))
-    job=store.claim(kinds=['revise_draft']);assert current_draft(store,job)['id']==second
-    fresh={**a,'subject':d['subject'],'body':d['body']};fresh['quality']={'passed':True,'proposal_hash':proposal_fingerprint(fresh)}
-    save_revision(store,job,RevisedEmail(subject=d['subject'],body=d['body'],review_note='Verified exact edit.',engine_version=a['engine_version'],context_hash=a['context_hash'],evidence_hash=a['evidence_hash'],quality=fresh['quality']))
-    newest=store.rows('SELECT * FROM drafts ORDER BY version DESC LIMIT 1')[0]
-    assert newest['body']==d['body'] and valid_draft(store,newest)
-    assert not store.rows('SELECT * FROM approvals')
-    with pytest.raises(ValueError):store.decide(second,True)
-    store.decide(newest['id'],True)
-    assert len(store.rows('SELECT * FROM approvals'))==1
+    j,a=assessed(store,opportunity,decision,['open_orders_require_review'],'order_status')
+    save_reviewed_fixture(store,j,a)
+    original=store.rows('SELECT * FROM drafts')[0]
+    first=store.revise_draft(original['id'],original['recipient'],'Changed subject','Intermediate copy')
+    final=store.revise_draft(first,original['recipient'],'Final subject','Final human text')
+    assert not store.rows("SELECT id FROM jobs WHERE kind IN ('review_sent','revise_draft')")
+    with pytest.raises(ValueError):store.decide(first,True)
+    store.decide(final,True)
+    assert not store.rows("SELECT id FROM jobs WHERE kind='review_sent'")
+    delivery=store.claim(['deliver'])
+    store.deliver(delivery);store.deliver(delivery);store.finish(delivery['id'])
+    assert store.rows('SELECT draft_id,subject,body FROM outbox')==[dict(draft_id=final,subject='Final subject',body='Final human text')]
+    reviews=store.rows("SELECT id FROM jobs WHERE kind='review_sent'")
+    assert len(reviews)==1
+    calls=[]
+    async def create(**kwargs):
+        calls.append(json.loads(kwargs['input']))
+        return SimpleNamespace(status='completed',output_text='The salesperson requested an order update.')
+    @asynccontextmanager
+    async def fake_client(*args):yield SimpleNamespace(responses=SimpleNamespace(create=create))
+    monkeypatch.setattr('clearline.telemetry.client_for',fake_client)
+    asyncio.run(execute_job(store,settings,store.claim(['review_sent'])))
+    assert len(calls)==1 and calls[0]['sent_message']=='Final human text'
+    assert conversation(store,'example')['messages'][0]['sent_review']=='The salesperson requested an order update.'
+    assert store.claim(['review_sent']) is None and len(store.rows('SELECT * FROM approvals'))==1
 
 
-def test_manual_review_cannot_rewrite_or_use_empty_quality_result(store,opportunity,decision):
+def test_outstanding_legacy_edit_becomes_confirmable_without_model(store,settings,opportunity,decision):
     from test_intelligence import assessed
-    j,a=assessed(store,opportunity,decision,['open_orders_require_review'],'order_status');save_reviewed_fixture(store,j,a)
+    from clearline.store import Store
+    j,a=assessed(store,opportunity,decision,['open_orders_require_review'],'order_status')
+    save_reviewed_fixture(store,j,a)
     old=store.rows('SELECT * FROM drafts')[0]
-    edited=store.revise_draft(old['id'],old['recipient'],old['subject'],'Could you confirm the status of the existing order?')
-    with store.connect(write=True) as c:c.execute("UPDATE jobs SET due_at='2000-01-01' WHERE kind='revise_draft'")
-    job=store.claim(kinds=['revise_draft'])
-    with pytest.raises(ValueError,match='exact saved human edit'):save_revision(store,job,result())
+    edited=store.revise_draft(old['id'],old['recipient'],old['subject'],'Exact previously saved human edit.')
+    with store.connect(write=True) as db:
+        db.execute("UPDATE drafts SET analysis=json_remove(analysis,'$.human_edit_hash') WHERE id=?",(edited,))
     d=store.rows('SELECT * FROM drafts WHERE id=?',(edited,))[0]
-    with pytest.raises(ValueError,match='successful quality review'):
-        save_revision(store,job,RevisedEmail(subject=d['subject'],body=d['body'],review_note='Claimed fine'))
+    legacy=store.enqueue('revise_draft',{'review_only':True,'draft_id':edited,'snapshot_hash':store.draft_hash(d)},'example')
+    Store(store.path)
+    assert store.rows('SELECT status FROM jobs WHERE id=?',(legacy,))==[{'status':'cancelled'}]
+    assert TestClient(create_app(settings)).get('/api/accounts/example').json()['drafts'][0]['can_review']
+    with store.connect(write=True) as db:db.execute("UPDATE drafts SET body='tampered' WHERE id=?",(edited,))
+    with pytest.raises(ValueError):store.decide(edited,True)
     assert not store.rows('SELECT * FROM approvals')
-    assert len(store.rows('SELECT * FROM drafts'))==2
 
 
-def test_failed_manual_review_can_be_reworked_with_human_guidance(store,opportunity,decision):
+def test_person_can_still_request_an_agent_rewrite(store,opportunity,decision):
     from test_intelligence import assessed
     from clearline.draft_revision import current_draft
     j,a=assessed(store,opportunity,decision,['known_distributor_channel'],'channel_support');save_reviewed_fixture(store,j,a)
@@ -141,11 +148,11 @@ def test_failed_manual_review_can_be_reworked_with_human_guidance(store,opportun
     with pytest.raises(ValueError):store.decide(edited,True)
 
 
-def test_account_detail_keeps_edited_draft_visible_without_approval(store,settings,opportunity,decision):
+def test_account_detail_allows_human_confirmation_after_edit(store,settings,opportunity,decision):
     from test_intelligence import assessed
     j,a=assessed(store,opportunity,decision,['open_orders_require_review'],'order_status');save_reviewed_fixture(store,j,a)
     d=store.rows('SELECT * FROM drafts')[0]
     edited=store.revise_draft(d['id'],d['recipient'],d['subject'],'Can you confirm the current order status?')
     api=TestClient(create_app(settings))
     saved=api.get('/api/accounts/example').json()['drafts'][0]
-    assert saved['id']==edited and saved['can_edit'] and not saved['can_review'] and saved['review_status']=='queued'
+    assert saved['id']==edited and saved['can_edit'] and saved['can_review'] and saved['review_status'] is None

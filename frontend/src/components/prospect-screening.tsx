@@ -2,6 +2,10 @@
 import {useState} from 'react';
 import {useApi,request,refresh,label,number,time} from '@/lib/api';
 import {Overlay} from './sales-surface';
+import {PipelineWorkspace} from './prospect-pipeline';
+import {ProspectDecision} from './prospect-decision';
+import {ProspectActivity} from './prospect-activity';
+import {display,type ProspectProgress} from '@/lib/prospect-pipeline';
 const categories=['verified_existing','possible_existing_channel','unverified_prospect','ambiguous_identity','unsuitable'];
 const statuses=['qualified','investigate','human_verification','defer','reject','not_assessed','needs_reassessment','queued','failed','accepted','held','rejected'];
 export const screeningLabel=(s:string)=>({verified_existing:'Existing direct buyer',possible_existing_channel:'Possible customer / channel link',unverified_prospect:'No named customer match',ambiguous_identity:'Identity needs review',unsuitable:'Unsupported institution',qualified:'Qualified for internal discovery',investigate:'More investigation needed',human_verification:'Human verification needed',reject:'AI recommends rejection',not_assessed:'Not yet AI-qualified',accepted:'Accepted for pursuit',held:'On hold',rejected:'Rejected by salesperson',needs_reassessment:'New information to assess'}[s]||label(s));
@@ -13,8 +17,20 @@ type Evidence={agency:Record<string,string>[];relationship_records:Record<string
 type Qualification={decision:{outcome:string;summary:string;rationale:string;product_fit:{sku:string;application_hypothesis:string;limitation:string}[];reasons_against:string[];missing_information:string[];next_task:string;task_owner:string;alternative:string;change_conditions:string;evidence_refs:string[]};review_passed:boolean;review:{explanation:string;critical_findings:string[]}};
 type Information={facts?:string;evidence?:string;recipient?:string;role?:string;route?:string;contact_verified?:boolean;authorized?:boolean;relationship_checked?:boolean;synthetic?:boolean};
 type Draft={id:string;version:number;recipient:string;subject:string;body:string;status:string};
-type Detail=Row&{evidence:Evidence;qualification:Qualification|null;qualification_current:boolean;context_hash:string;last_assessed_at:string|null;jobs:{id:string;status:string;error:string|null}[];workflow:{decision:string;rationale:string;information:Information;stage:string};outreach_prerequisites:string[];drafts:Draft[];history:{id:string;kind:string;note:string;created_at:string}[]};
-export function ProspectScreening(){
+type Detail=Row&{prospect_progress?:ProspectProgress;evidence:Evidence;qualification:Qualification|null;qualification_current:boolean;context_hash:string;last_assessed_at:string|null;jobs:{id:string;status:string;error:string|null}[];workflow:{decision:string;rationale:string;information:Information;stage:string};outreach_prerequisites:string[];drafts:Draft[];history:{id:string;kind:string;note:string;created_at:string}[]};
+export function ProspectScreening({params=''}:{params?:string}){
+ const {data:flags,error}=useApi<{prospect_screening:boolean}>('/features');
+ const [legacy,setLegacy]=useState(false);
+ if(error)return <p role="alert">{error}</p>;
+ if(!flags)return <p>Checking screening availability…</p>;
+ if(!flags.prospect_screening)return <><h1 className="section-page-title">Prospect Screening</h1><p>This section is awaiting review and is not enabled.</p></>;
+ const filters=new URLSearchParams(params);
+ for(const key of ['agency','account','candidate'])filters.delete(key);
+ return <section className="screening"><PipelineWorkspace key={filters.toString()} params={filters.toString()}/>
+  <details className="secondary-work" onToggle={e=>setLegacy(e.currentTarget.open)}><summary>Agency file qualification tools</summary>{legacy&&<CsvQualificationTools/>}</details>
+ </section>;
+}
+function CsvQualificationTools(){
  const {data:flags,error:flagError}=useApi<{prospect_screening:boolean}>('/features');
  const enabled=flags?.prospect_screening;
  const {data:summary,error}=useApi<Summary>(enabled?'/screening':null);
@@ -25,8 +41,8 @@ export function ProspectScreening(){
  async function scan(){setBusy(true);try{await request('/screening/scan','POST',{});setNotice('Screening queued. Unchanged assessments and your decisions are retained.');refresh()}catch(e){setNotice((e as Error).message)}finally{setBusy(false)}}
  if(flagError)return <p role="alert">{flagError}</p>;
  if(!flags)return <p>Checking screening availability…</p>;
- if(!enabled)return <><h1>Prospect Screening</h1><p>This section is awaiting review and is not enabled.</p></>;
- return <section className="screening"><div className="page-heading"><h1>Prospect Screening</h1><div className="button-row"><button className="action-link" onClick={scan} disabled={busy}>Screen agency records</button><button className="action-link" onClick={shortlist} disabled={busy||(summary?.budget?.agencies??0)>=15||summary?.budget?.remaining_usd===0}>Qualify next 10 candidates</button></div></div>
+ if(!enabled)return <><h1 className="section-page-title">Prospect Screening</h1><p>This section is awaiting review and is not enabled.</p></>;
+ return <section className="screening"><div className="page-heading"><h2>Agency file qualification</h2><div className="button-row"><button className="action-link" onClick={scan} disabled={busy}>Screen agency records</button><button className="action-link" onClick={shortlist} disabled={busy||(summary?.budget?.agencies??0)>=15||summary?.budget?.remaining_usd===0}>Qualify next 10 candidates</button></div></div>
  <p>Fictional institutions from the supplied agency file. A ranking identifies discovery priorities; it does not prove demand or a new customer relationship.</p>
  {(error||listError)&&<p role="alert">{error||listError}</p>}{notice&&<p role="status">{notice}</p>}
  {summary&&<div className="screening-metrics">{[['Records screened',summary.source_records],['Existing direct buyers',summary.classifications.verified_existing||0],['Possible customer / channel links',summary.classifications.possible_existing_channel||0],['Identity conflicts',summary.classifications.ambiguous_identity||0],['Awaiting AI qualification',summary.awaiting_qualification||0],['Qualified for discovery',summary.qualification_counts.qualified||0],['Held / deferred', summary.held_or_deferred||0],['Rejected / unsupported',summary.excluded_records||0]].map(([title,value])=><div className="panel" key={title}><span>{title}</span><strong>{number(Number(value))}</strong></div>)}</div>}
@@ -42,19 +58,19 @@ export function ProspectScreening(){
 }
 export function ScreeningDetail({id}:{id:string}){
  const {data,error}=useApi<Detail>('/screening/agencies/'+id);
- const [busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[rationale,setRationale]=useState(''),[note,setNote]=useState(''),[activity,setActivity]=useState('response_received');
+ const [busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[note,setNote]=useState(''),[activity,setActivity]=useState('response_received');
  if(error)return <p role="alert">{error}</p>;if(!data)return <p>Loading agency evidence…</p>;
  const item=data,assessment=item.qualification,decision=assessment?.decision;
  async function act(path:string,body:unknown,message:string){setBusy(true);try{await request(path,'POST',body);setNotice(message);refresh()}catch(e){setNotice((e as Error).message)}finally{setBusy(false)}}
  const prefix='/screening/agencies/'+id;
  return <div className="screening-detail"><h2>{item.name}</h2><p>{screeningLabel(item.classification)} · {item.state}</p><p>{item.evidence.classification_reason}</p>
+ {item.prospect_progress&&<><p><strong>{display(item.prospect_progress.stage)}</strong> · {item.prospect_progress.next_action}</p><ProspectActivity activity={item.prospect_progress.latest_activity} version={item.drafts[0]?.version}/></>}
  {item.ranking&&<><h3>Discovery score: {item.ranking.score.toFixed(1)}/100</h3><ul>{item.ranking.factors.map(f=><li key={f.key}><strong>{f.label}: {f.points}/{f.maximum}.</strong> {f.reason}</li>)}</ul><p>{item.ranking.interpretation} {item.ranking.restriction}</p></>}
  <button className="action-link" onClick={()=>act(prefix+'/qualify',{evidence_hash:item.evidence_hash},'Qualification queued for this prospect only.')} disabled={busy||item.qualification_current||['held','rejected'].includes(item.workflow?.decision)||item.jobs.some(j=>['queued','running'].includes(j.status))}>{item.qualification_current?'Current assessment saved':assessment?'Reassess new information':'Investigate and qualify'}</button>
  {notice&&<p role="status">{notice}</p>}{item.jobs.map(j=><p key={j.id}>{label(j.status)}{j.error?': '+j.error:''}{['failed','blocked_config'].includes(j.status)&&<button className="action-link" disabled={busy} onClick={()=>act('/jobs/'+j.id+'/retry',undefined,'Retry queued within the same budget.')}>Retry qualification</button>}</p>)}
  {decision&&<><h3>{screeningLabel(decision.outcome)}</h3>{!item.qualification_current&&<p role="status">This assessment predates the latest information. Reassess before preparing outreach.</p>}<p>{decision.summary}</p><p>{decision.rationale}</p><h3>Product-fit assessment</h3>{decision.product_fit.map(f=><p key={f.sku}><strong>{f.sku}:</strong> {f.application_hypothesis} {f.limitation}</p>)}<h3>Recommended next step</h3><p><strong>{decision.task_owner}:</strong> {decision.next_task}</p><h3>Uncertainties and reasons against pursuing</h3><ul>{[...decision.reasons_against,...decision.missing_information].map((v,i)=><li key={i}>{v}</li>)}</ul><p><strong>Alternative:</strong> {decision.alternative}</p><p><strong>Reconsider when:</strong> {decision.change_conditions}</p><p><strong>Evidence:</strong> {decision.evidence_refs.join(', ')}</p><h3>Independent commercial review</h3><p>{assessment?.review_passed?'Accepted':'Unresolved — do not pursue'}. {assessment?.review.explanation}</p>{assessment?.review.critical_findings.map((v,i)=><p role="alert" key={i}>{v}</p>)}<p className="muted">Assessed {time(item.last_assessed_at)}</p></>}
  <h3>Your decision</h3><p>{screeningLabel(item.workflow?.decision||'new')}{item.workflow?.rationale?': '+item.workflow.rationale:''}</p>
- <label>Reason or specific check needed<textarea value={rationale} onChange={e=>setRationale(e.target.value)} placeholder="Explain why to pursue, what needs checking, or why to discard."/></label>
- <div className="button-row">{[['accepted','Accept for pursuit'],['held','Hold pending a check'],['rejected','Reject prospect']].map(([value,title])=><button key={value} className="action-link" disabled={busy||!rationale.trim()} onClick={()=>act(prefix+'/decision',{decision:value,rationale},'Decision saved. Acceptance does not approve outreach.')}>{title}</button>)}</div>
+ <ProspectDecision key={id} id={id} busy={busy} onBusy={setBusy} onNotice={setNotice}/>
  <h3>Verified information and contact</h3><p>Save facts from a verified source. Partial information is allowed; saving does not run AI or grant permission to send.</p>
  <InformationForm key={item.context_hash} initial={item.workflow?.information||{}} busy={busy} save={information=>act(prefix+'/information',{information,context_hash:item.context_hash},'Information saved. Request one targeted reassessment when ready.')}/>
  <h3>Prepare outreach</h3>{!!item.outreach_prerequisites?.length&&<ul>{item.outreach_prerequisites.map(x=><li key={x}>{x}</li>)}</ul>}

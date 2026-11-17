@@ -31,13 +31,41 @@ export function verificationExplanation(task:Task,signals:SavedCommercialSignal[
  return {context:plainEnglish(task.reason),next:null,financial:null};
 }
 
-type BriefAction={id:string;why:string;accounts:number;financial_cents?:number|null;historical_decline_cents?:number|null;financial_label?:string};
+export type RevenueContext={historical_decline_cents:number|null;metric:'positive_account_net_purchasing_decline';comparison:{current_start:string;current_end_exclusive:string;prior_start:string;prior_end_exclusive:string}|null;total_accounts:number;accounts:number;excluded_distributor_accounts:number;excludes_distributors:boolean;unavailable_reason:string|null};
+type BriefAction={id:string;why:string;accounts:number;financial_cents?:number|null;historical_decline_cents?:number|null;financial_label?:string;revenue_context?:RevenueContext};
+export function actionFinancialCents(a:Pick<BriefAction,'revenue_context'|'financial_cents'|'historical_decline_cents'>){return a.revenue_context?a.revenue_context.historical_decline_cents:a.financial_cents??a.historical_decline_cents;}
+export function comparisonPeriod(comparison:RevenueContext['comparison']){
+ if(!comparison)return 'the saved comparable periods';
+ const period=(start:string,end:string)=>{
+  const from=new Date(`${start}T00:00:00Z`),exclusive=new Date(`${end}T00:00:00Z`),last=new Date(exclusive.getTime()-86400000);
+  const month=(d:Date)=>d.toLocaleDateString('en-US',{month:'long',timeZone:'UTC'});
+  if(from.getUTCDate()===1&&exclusive.getUTCDate()===1&&from.getUTCFullYear()===last.getUTCFullYear())return `${month(from)}${from.getUTCMonth()===last.getUTCMonth()?'':`–${month(last)}`} ${from.getUTCFullYear()}`;
+  const full=(d:Date)=>d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric',timeZone:'UTC'});
+  return `${full(from)}–${full(last)}`;
+ };
+ return `${period(comparison.current_start,comparison.current_end_exclusive)} versus ${period(comparison.prior_start,comparison.prior_end_exclusive)}`;
+}
 export function actionDescription(a:BriefAction,asOf?:string){
  let text=plainEnglish(a.why);
- if(a.id==='contacts'||a.id==='investigation:contacts')text=`These ${a.accounts} accounts have purchasing-contact or relationship questions that need verification. Confirm the missing details in each saved task so the agent can reconsider whether outreach is justified and who may receive it.`;
- else if(a.id==='investigation:orders')text=`These ${a.accounts} accounts have specific order or credit records needing clarification. Ask the suggested internal team for the missing status or explanation and record the findings so the agent can distinguish unresolved operational issues from completed business.`;
+ if(a.id==='contacts'||a.id==='investigation:contacts')text=`These ${a.accounts} accounts have purchasing-contact or relationship information that needs verification. Record the missing details so Clearline can determine where outreach is justified and who may receive it.`;
+ else if(a.id==='investigation:orders')text=`These ${a.accounts} accounts have order or credit records that need clarification. Ask the named internal owners to confirm their status so Clearline can address unresolved issues before further outreach.`;
+ else if(a.id==='investigation:needs')text=`These ${a.accounts} accounts have recorded training, product or purchasing questions. Confirm with the named owners which needs remain relevant so the agent can recommend appropriate support.`;
+ else if(a.id==='investigation:records')text=`These ${a.accounts} accounts have unresolved questions in their saved reviews. Record supported answers from the named owners so the agent can determine the appropriate next step.`;
+ if(a.id==='investigation:orders')text+=' Checking what shipped, what was canceled and why credits were issued could uncover a billing or delivery problem that Clearline can fix to protect a pending order or keep the customer’s trust.';
+ else if(a.id==='investigation:contacts')text+=' Reconnecting with the right buyer through the authorized channel could reveal a change in how the customer buys or a supply need that leads to a reorder.';
+ else if(a.id==='investigation:needs')text+=' If the customer confirms a need, training or product support could earn repeat business, while a supply gap could justify replenishment or an additional product.';
+ else if(a.id==='investigation:records')text+=' Separating billing, identity or data errors from genuine purchasing obstacles helps salespeople focus on declines they may be able to reverse.';
+ const context=a.revenue_context;
+ if(context){
+  if(context.historical_decline_cents==null)return `${text} ${context.unavailable_reason||'Comparable purchasing figures are unavailable for these records.'}`;
+  const scope=`${context.accounts} non-distributor account${context.accounts===1?'':'s'}`;
+  const period=comparisonPeriod(context.comparison);
+  if(context.historical_decline_cents<=0)return `${text} The ${scope} show no positive recorded purchasing decline (${period}); the checks may still resolve operational or relationship questions.`;
+  const qualification=a.id==='investigation:orders'?'This is historical decline, not an outstanding-order or credit balance or a recovery forecast':a.id==='investigation:needs'?'This is historical account decline, not training revenue or an estimate of new sales':'This is historical decline associated with these accounts, not a recovery forecast';
+  return `${text} Across ${scope}, positive purchasing declines total ${exactMoney(context.historical_decline_cents)} (${period}). ${qualification}; groups overlap and must not be added.`;
+ }
  const value=a.financial_cents??a.historical_decline_cents;
- if(value==null)return `${text} A combined revenue total is not provided for this group; use the account-specific records to distinguish historical decline, credits, and open-order value.`;
+ if(value==null)return `${text} No comparable purchasing total is attached to these records.`;
  if(value<=0)return text;
  const period=asOf&&/^\d{4}-11-01$/.test(asOf)?`January–October ${Number(asOf.slice(0,4))-1} versus ${asOf.slice(0,4)}`:'the saved comparable periods';
  if(!a.financial_label||/decline/i.test(a.financial_label))return `${text} The displayed ${exactMoney(value)} sums the positive account-level purchasing declines associated with this group (${period}), rather than the value of the checks themselves. It is historical deterioration, not forecast recovery; groups can overlap and their amounts must not be added.`;
@@ -56,3 +84,10 @@ export function conversationSummary(t:{provider?:string;messages:ConversationMes
  const ending=latest.direction==='outbound'? 'No subsequent customer reply is recorded.' : latest.interpretation?`The saved AI interpretation recommends: ${plainEnglish(latest.interpretation.recommended_action)}`:'A customer reply is recorded, but no AI interpretation is saved yet.';
  return `${prefix} ${topic} ${latest.direction==='outbound'?'was an outgoing email':'was a customer reply'}. ${ending}`;
 }
+
+export type TaskInquiryState = 'draft' | 'status_requested' | 'response_recorded';
+export const taskInquiryLabel: Record<TaskInquiryState, string> = {
+ draft: 'Internal email prepared for review',
+ status_requested: 'Internal request sent · awaiting response',
+ response_recorded: 'Internal reply recorded · verify the finding',
+};

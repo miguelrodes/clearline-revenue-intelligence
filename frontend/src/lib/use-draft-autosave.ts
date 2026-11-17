@@ -1,18 +1,57 @@
 "use client";
-import {useEffect,useRef,useState} from 'react';
+import {useCallback,useEffect,useRef,useState} from 'react';
 import {request,refresh} from './api';
 import type {Draft} from './types';
+
+type Fields=Pick<Draft,'recipient'|'subject'|'body'>;
+type Snapshot=Fields & Pick<Draft,'id'|'version'>;
+function copy(d:Fields):Fields{return {recipient:d.recipient,subject:d.subject,body:d.body}}
+function same(a:Fields,b:Fields){return a.recipient===b.recipient&&a.subject===b.subject&&a.body===b.body}
+
 export function useDraftAutosave(d:Draft,editable=true){
- const [fields,setFields]=useState({recipient:d.recipient,subject:d.subject,body:d.body});
- const [saving,setSaving]=useState(false);const [error,setError]=useState('');const [retry,setRetry]=useState(0);
- const waiting=useRef<string|null>(null);const known=useRef(d.id);
- const dirty=fields.recipient!==d.recipient||fields.subject!==d.subject||fields.body!==d.body;
+ const [fields,setFields]=useState<Fields>(()=>copy(d));
+ const [saving,setSaving]=useState(false),[error,setError]=useState('');
+ const saved=useRef<Snapshot>(d),remoteId=useRef(d.id);
+ const inFlight=useRef<Promise<Snapshot>|null>(null);
+ const conflict=useRef(false),generation=useRef(0);
+ const dirty=!same(fields,d);
  const valid=Object.values(fields).every(v=>v.trim());
- useEffect(()=>{if(known.current!==d.id){known.current=d.id;if(!dirty||waiting.current===d.id){setFields({recipient:d.recipient,subject:d.subject,body:d.body});waiting.current=null;setSaving(false);setError('')}else{setSaving(false);setError('This email changed elsewhere. Reopen it before editing.')}}},[d.id,d.recipient,d.subject,d.body,dirty]);
- useEffect(()=>{if(!editable||!dirty||!valid||saving||error)return;
-  const timer=setTimeout(async()=>{setSaving(true);try{const result=await request<{draft_id:string}>(`/drafts/${d.id}`,'PATCH',{version:d.version,...fields});waiting.current=result.draft_id;refresh()}catch(e){setError((e as Error).message);setSaving(false)}},650);
+ useEffect(()=>{
+  if(remoteId.current===d.id)return;
+  remoteId.current=d.id;
+  if(d.id===saved.current.id || d.version<saved.current.version)return;
+  generation.current++;
+  if(same(fields,saved.current)){saved.current=d;setFields(copy(d));conflict.current=false;setError('')}
+  else{conflict.current=true;setError('This email changed elsewhere. Reopen it before editing.')}
+ },[d,fields]);
+ const save=useCallback(async(values:Fields,expected=generation.current):Promise<Snapshot>=>{
+  while(inFlight.current)await inFlight.current;
+  if(conflict.current||expected!==generation.current)throw new Error('This email changed elsewhere. Reopen it before editing.');
+  const base=saved.current;
+  if(same(values,base))return base;
+  if(!editable||!Object.values(values).every(v=>v.trim()))throw new Error('Complete all email fields before confirming.');
+  const pending=request<{draft_id:string;version:number}>(`/drafts/${base.id}`,'PATCH',{version:base.version,...values}).then(result=>{
+   const next={id:result.draft_id,version:result.version,...values};
+   saved.current=next;
+   refresh();
+   return next;
+  });
+  inFlight.current=pending;setSaving(true);
+  try{return await pending}
+  catch(e){setError((e as Error).message);throw e}
+  finally{inFlight.current=null;setSaving(false)}
+ },[editable]);
+ useEffect(()=>{
+  if(!editable||!dirty||!valid||error||saving||same(fields,saved.current))return;
+  const timer=setTimeout(()=>{void save(fields).catch(()=>{})},650);
   return()=>clearTimeout(timer);
- },[fields,d.id,d.version,dirty,valid,editable,saving,error,retry]);
- useEffect(()=>{if(!dirty&&!saving)return;const warn=(e:BeforeUnloadEvent)=>{e.preventDefault();e.returnValue=''};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn)},[dirty,saving]);
- return {fields,setFields,saving,error,pending:dirty||saving,status:error?'Could not save edits.':saving?'Saving…':dirty?(valid?'Saving…':'Complete all fields to save.'):'Saved',retry:()=>{setError('');setRetry(n=>n+1)}};
+ },[fields,dirty,valid,editable,saving,error,save]);
+ useEffect(()=>{
+  if(!dirty&&!saving)return;
+  const warn=(e:BeforeUnloadEvent)=>{e.preventDefault();e.returnValue=''};
+  window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn)
+ },[dirty,saving]);
+ return {fields,setFields,saving,error,pending:dirty||saving,valid,save,generation,
+  status:error?'Could not save edits.':saving||dirty?(valid?'Saving…':'Complete all fields to save.'):'Saved',
+  retry:()=>{if(!conflict.current)setError('')}};
 }

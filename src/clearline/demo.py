@@ -18,6 +18,24 @@ from .config import ROOT,Settings
 from .store import Store,utcnow
 
 DEMO_DIR=ROOT/'runtime'/'demo'
+CONVERSATION_DIR=ROOT/'runtime/phase12-acceptance/conversation-demo'
+CONVERSATION_SESSION=CONVERSATION_DIR/'session.sqlite3'
+CONVERSATION_BUDGET=CONVERSATION_DIR/'interactive-budget.sqlite3'
+
+
+def conversation_spending(path):
+    """Live incremental meter for the isolated conversation, independent of restored business records."""
+    if path.resolve()!=CONVERSATION_SESSION:return None
+    with sqlite3.connect(CONVERSATION_BUDGET.as_uri()+'?mode=ro',uri=True) as con:
+        meta=dict(con.execute('SELECT key,value FROM metadata'))
+        if (not meta.get('interactive_budget_id') or meta['interactive_budget_id']!=manifest(CONVERSATION_DIR).get('interactive_budget_id')
+                or meta.get('db_path')!=str(path.resolve()) or meta.get('limit_micro')!='2000000'):
+            raise ValueError('Rehearsal spending ledger does not match this session.')
+        count,settled,reserved=con.execute("""SELECT COUNT(*),COALESCE(SUM(charged_micro),0),
+            COALESCE(SUM(CASE WHEN charged_micro IS NULL THEN reserved_micro ELSE 0 END),0) FROM requests""").fetchone()
+    limit=int(meta['limit_micro'])
+    return dict(limit_usd=limit/1e6,charged_usd=settled/1e6,reserved_usd=reserved/1e6,
+                remaining_usd=max(0,limit-settled-reserved)/1e6,generation_requests=count)
 
 
 def paths(folder=DEMO_DIR):

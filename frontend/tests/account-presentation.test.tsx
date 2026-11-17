@@ -1,6 +1,6 @@
 import {it,expect,vi} from 'vitest';
 import {render,screen,fireEvent} from '@testing-library/react';
-import {recommendationIntroduction,verificationExplanation,actionDescription,conversationSummary,plainEnglish} from '../src/lib/account-presentation';
+import {recommendationIntroduction,verificationExplanation,actionDescription,actionFinancialCents,comparisonPeriod,conversationSummary,plainEnglish,type RevenueContext} from '../src/lib/account-presentation';
 import {statusTone} from '../src/components/status-badge';
 import {FullAccountHistory} from '../src/components/account-history';
 import type {Account,SavedCommercialSignal} from '../src/lib/types';
@@ -11,6 +11,25 @@ it('only includes the exact referenced order values and deduplicates repeated si
 it('does not infer amounts for missing financial evidence or unrelated tasks',()=>{expect(verificationExplanation({title:'Verify ownership',reason:'Owner unknown',owner:'',evidence_refs:'invalid'},signals).financial).toBeNull();expect(verificationExplanation({title:'Check credit',reason:'Check reason',owner:'Finance',evidence_refs:'[]'},signals).financial).toBeNull();});
 it('credits retain their net-revenue meaning, rather than becoming open-order value',()=>{const result=verificationExplanation({title:'Explain credit',reason:'Check reason',owner:'Finance',evidence_refs:'["orders:1119"]'},[{category:'churn_prevention',amount_cents:201474,evidence:{credit_rows:['orders:1119']}}]);expect(result.financial).toContain('$2,014.74 in historical credit value');expect(result.financial).toContain('not a recovery estimate');});
 it('explains the saved group amount and actual comparable periods without revising brief bullets',()=>{const text=actionDescription({id:'investigation:contacts',accounts:25,why:'Original wording',financial_cents:11612600,financial_label:'Comparable-period purchasing decline'},'2026-11-01');expect(text).toContain('25 accounts');expect(text).toContain('$116,126.00');expect(text).toContain('January–October 2025 versus 2026');expect(text).toContain('groups can overlap');expect(actionDescription({id:'check',accounts:1,why:'Check order',financial_cents:null},'2026-11-01')).not.toContain('$');});
+const financialContext:RevenueContext={historical_decline_cents:123456,accounts:2,total_accounts:3,excluded_distributor_accounts:1,excludes_distributors:true,metric:'positive_account_net_purchasing_decline',comparison:{current_start:'2026-01-01',current_end_exclusive:'2026-11-01',prior_start:'2025-01-01',prior_end_exclusive:'2025-11-01'},unavailable_reason:null};
+it.each(['orders','contacts','needs','records'])('explains %s using shared context with no additive or recoverable-revenue claim',key=>{
+ const a={id:`investigation:${key}`,why:'Saved recommendation',accounts:3,financial_cents:null,revenue_context:financialContext};
+ const text=actionDescription(a);
+ expect(text).toContain('3 accounts');expect(text).toContain('Across 2 non-distributor accounts');expect(text).toContain('$1,234.56');
+ expect(text).toContain('January–October 2026 versus January–October 2025');expect(text).toContain('groups overlap and must not be added');
+ expect(text).not.toContain('combined revenue total');expect(actionFinancialCents(a)).toBe(123456);
+ if(key==='orders')expect(text).toContain('not an outstanding-order or credit balance');
+ if(key==='needs')expect(text).toContain('not training revenue');
+ if(key==='contacts')expect(text).toContain('not a recovery forecast');
+});
+it('distinguishes a known zero from missing figures without falling back to an unsupported amount',()=>{
+ const a={id:'investigation:contacts',why:'Check purchasing contact',accounts:3,financial_cents:999999};
+ const zero={...a,revenue_context:{...financialContext,historical_decline_cents:0}};
+ expect(actionDescription(zero)).toContain('no positive recorded purchasing decline');expect(actionDescription(zero)).not.toContain('$');expect(actionFinancialCents(zero)).toBe(0);
+ const unknown={...a,revenue_context:{...financialContext,historical_decline_cents:null,unavailable_reason:'The saved purchasing comparison period is unavailable.'}};
+ expect(actionDescription(unknown)).toContain('period is unavailable');expect(actionDescription(unknown)).not.toContain('$');expect(actionFinancialCents(unknown)).toBeNull();
+ expect(comparisonPeriod({...financialContext.comparison!,current_end_exclusive:'2026-07-01',prior_end_exclusive:'2025-07-01'})).toBe('January–June 2026 versus January–June 2025');
+});
 it('distinguishes CRM notes, simulated exchanges, and an unprocessed reply',()=>{expect(conversationSummary({status:'not_started',messages:[]},'Needs training')).toContain('not a recorded customer exchange');const msg={direction:'outbound',subject:'Purchasing question',body:'Hello',created_at:'2026-11-01',status:'sent_simulated'};expect(conversationSummary({status:'awaiting_response',messages:[msg]})).toContain('No subsequent customer reply');expect(conversationSummary({provider:'simulated',status:'replied',messages:[{...msg,direction:'inbound'}]})).toContain('no AI interpretation is saved yet');});
 it('keeps no-action separate from completed work and preserves status categories',()=>{expect(statusTone('no_action')).toBe('neutral');expect(statusTone('resolved')).toBe('complete');expect(statusTone('internal_investigation')).toBe('investigating');expect(statusTone('human_verification')).toBe('verification');expect(statusTone('awaiting_approval')).toBe('action');expect(statusTone('agent_held')).toBe('blocked');});
 it('shows full history immediately and pages only this account without mutations',async()=>{const fetcher=vi.fn(async(url:unknown)=>({ok:true,json:async()=>({account_id:'range',total:51,offset:String(url).includes('offset=50')?50:0,next_offset:String(url).includes('offset=50')?null:50,items:[{source_row:String(url).includes('offset=50')?51:1,order_id:String(url).includes('offset=50')?'LAST-ORDER':'FIRST-ORDER',order_date:'',status:'open',sku:'CL-FS10',qty:'2',line_total:'50.25',bill_to_account:'Range Line',end_customer:''}]})}));vi.stubGlobal('fetch',fetcher);render(<FullAccountHistory account={account}/>);expect(screen.getByRole('heading',{name:'Full Account History'})).toBeVisible();expect(await screen.findByText('FIRST-ORDER')).toBeVisible();expect(screen.getByText('Unknown date')).toBeVisible();fireEvent.click(screen.getByRole('button',{name:'Next records'}));expect(await screen.findByText('LAST-ORDER')).toBeVisible();expect(screen.queryByText('FIRST-ORDER')).not.toBeInTheDocument();expect(fetcher.mock.calls.every(([url])=>String(url).startsWith('/api/accounts/range/orders?'))).toBe(true);});

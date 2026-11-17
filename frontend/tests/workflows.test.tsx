@@ -7,17 +7,20 @@ import {DraftEditor,OpportunityTable} from "../src/components/workspace";
 const draft:Draft={id:"test-draft",opportunity_id:"test",version:2,evidence_hash:"hash",recipient:"simulation@example.invalid",subject:"Purchasing check-in",body:"Please confirm the purchasing contact.",status:"awaiting_approval",can_review:true,created_at:"2026-11-11T12:00:00+00:00"};
 beforeEach(()=>{vi.restoreAllMocks();params.delete("signal");vi.stubGlobal("fetch",vi.fn().mockResolvedValue({ok:true,json:async()=>({status:"approved",draft_id:"new-version"})}))});
 describe("Human approval workflow",()=>{
- it("requires saving edits before approval and transmits exact version",async()=>{
+ it("can confirm immediately after typing and approves the exact newly saved version",async()=>{
+  vi.mocked(fetch).mockResolvedValueOnce({ok:true,json:async()=>({draft_id:"edited",version:3})} as Response);
   render(<DraftEditor draft={draft}/>);
   fireEvent.change(screen.getByLabelText("Subject"),{target:{value:"Revised subject"}});
-  expect(screen.getByRole("button",{name:"Approve simulated send"})).toBeDisabled();
+  fireEvent.click(screen.getByRole("button",{name:"Approve simulated send"}));
+  expect(screen.getByRole("dialog")).toHaveTextContent("Revised subject");
   expect(fetch).not.toHaveBeenCalled();
-  expect(screen.queryByRole("button",{name:"Save changes"})).not.toBeInTheDocument();
-  await waitFor(()=>expect(fetch).toHaveBeenCalledOnce());
-  const [url,options]=vi.mocked(fetch).mock.calls[0];
-  expect(url).toBe("/api/drafts/test-draft");
-  expect(options?.method).toBe("PATCH");
-  expect(JSON.parse(options?.body as string)).toEqual({version:2,recipient:draft.recipient,subject:"Revised subject",body:draft.body});
+  fireEvent.click(screen.getByRole("button",{name:"Confirm"}));
+  await waitFor(()=>expect(fetch).toHaveBeenCalledTimes(2));
+  const calls=vi.mocked(fetch).mock.calls;
+  expect(calls[0][0]).toBe("/api/drafts/test-draft");
+  expect(calls[0][1]?.method).toBe("PATCH");
+  expect(calls[1][0]).toBe("/api/drafts/edited/decision");
+  expect(JSON.parse(calls[1][1]?.body as string)).toEqual({version:3,recipient:draft.recipient,subject:"Revised subject",body:draft.body,approve:true});
  });
  it("never approves merely by opening a draft or approval preview",async()=>{
   render(<DraftEditor draft={draft}/>);

@@ -44,33 +44,33 @@ To connect ChatGPT later:
 2. In ChatGPT, open Plugins, choose **+ → Add custom MCP server**, select URL or Tunnel, configure its supported authentication, create/install the plugin, and test a read-only briefing first. Workspace administrators may restrict this option. [Custom MCP setup](https://developers.openai.com/api/docs/guides/custom-mcp-server).
 3. Keep approval confirmation enabled for `decide_outreach`. An external host must obtain human consent; an MCP server cannot independently prove what a human typed in another product.
 
-### Secure MCP Tunnel: prepared locally, account setup pending
+### Secure MCP Tunnel: isolated rehearsal
 
-The official Apple Silicon client v0.0.20 is installed at `runtime/bin/tunnel-client`; its release SHA-256 was verified. Use the [latest official release](https://github.com/openai/tunnel-client/releases/latest) for future installations. `scripts/start_secure_mcp_tunnel.py` wraps the supported CLI, checks that the backend uses the registered disposable demo, and forwards only to `http://127.0.0.1:8000/mcp`. Both normal calls and discovery probes carry the local bearer credential via an environment reference. No token is placed in command arguments or configuration files by the launcher; raw HTTP logging and remote administration are disabled. It does not inherit alternate endpoint/profile settings or fall back to the model API key.
+The existing Apple Silicon `tunnel-client` v0.0.20 is installed at `~/Code/clearline-revenue-intelligence/runtime/bin/tunnel-client`. The launcher resolves that installed binary when this integration checkout has no local copy. It verifies the backend’s disposable-demo status through authenticated MCP and forwards only to `http://127.0.0.1:8003/mcp`, the conversation rehearsal. It reads that rehearsal’s existing MCP bearer token from the local Code checkout `.env`. Discovery and regular MCP requests use the bearer token through an environment reference. The runtime key and local MCP token are not placed in command arguments, raw HTTP logging is disabled, and remote administration is disabled.
 
 User setup:
 
 1. Open [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels) in the intended organization. Create a private tunnel and associate it with the ChatGPT workspace intended for this demonstration. Creating it requires Tunnels **Read + Manage**; running/selecting it requires **Read + Use**. A personal Platform organization does not automatically grant access in the Northeastern Edu workspace.
-2. Create a separate restricted runtime key in [Platform API keys](https://platform.openai.com/settings/organization/api-keys), with Tunnels **Read + Use**, not an admin key. Enter the values locally into the existing ignored `.env` (mode 0600), never into chat:
-
-   ```dotenv
-   CONTROL_PLANE_TUNNEL_ID=<the created tunnel ID>
-   CONTROL_PLANE_API_KEY=<the restricted runtime key>
-   ```
-
-   Leave `CLEARLINE_MCP_TOKEN` unchanged. Do not place literal keys into shell commands or screenshots.
-3. With the demo running, validate and then start the foreground client:
+2. Create a separate restricted runtime key in [Platform API keys](https://platform.openai.com/settings/organization/api-keys), with Tunnels **Read + Use**, not an admin key. In Terminal, run this helper from the integration checkout. It prompts without echoing the values and saves them to the ignored local `.env` with owner-only permissions:
 
    ```bash
-   .venv/bin/python scripts/start_secure_mcp_tunnel.py doctor
-   .venv/bin/python scripts/start_secure_mcp_tunnel.py run
+   cd "/Users/miguelrodes/Documents/New project/clearline-integration"
+   PYTHONPATH=src /Users/miguelrodes/Code/clearline-revenue-intelligence/.venv/bin/python scripts/configure_secure_mcp_tunnel.py
+   ```
+
+   Do not paste the values into chat, shell commands, screenshots, or Git. The local MCP token and OpenAI model API key remain separate.
+3. With the isolated rehearsal API running on port 8003, validate and then start the foreground client:
+
+   ```bash
+   PYTHONPATH=src /Users/miguelrodes/Code/clearline-revenue-intelligence/.venv/bin/python scripts/start_secure_mcp_tunnel.py doctor
+   PYTHONPATH=src /Users/miguelrodes/Code/clearline-revenue-intelligence/.venv/bin/python scripts/start_secure_mcp_tunnel.py run
    ```
 
    Keep it running during ChatGPT discovery and every tool call. Check `http://127.0.0.1:8080/readyz` and `/ui` for readiness and active polling. A passing local test does not establish remote tunnel readiness.
 4. In [ChatGPT Plugins](https://chatgpt.com/plugins), add a custom MCP server with **Connection: Tunnel**, select the same tunnel and install the private plugin. Confirm organization/workspace scope and the authentication settings before granting access. This application still requires its local token. If the workspace requires user OAuth, configure a supported OAuth provider rather than weakening authentication; this remains a setup decision, not a completed integration.
-5. Make a read-only first call: “Use Clearline to call get_brief and summarize the saved priorities. Do not change or send anything.” Verify the tool result against the dashboard. Keep confirmation enabled for write tools, particularly `decide_outreach`; never allow blanket approval of messages.
+5. Ask “What are my top priorities right now?” The default `get_brief` reports named customer and prospect actions, internal inquiries awaiting findings, and active scheduled follow-ups. `list_actions` shows the same priorities and can open a group. Use `get_brief(view="saved_brief")` to inspect the earlier recovery briefing. Keep confirmation enabled for write tools, particularly `decide_outreach`, so each exact message requires human approval.
 
-Current blocker: no tunnel ID or restricted runtime key is configured. The launcher fails closed with the exact missing-variable message. Remote readiness, workspace access, ChatGPT discovery and a real ChatGPT tool call remain unverified. This is distinct from the real API-backed local chatbot test, which passed. [Official Secure MCP Tunnel setup](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
+ChatGPT workspace access, remote discovery, and a real ChatGPT tool call must still be checked after the tunnel client reports healthy polling. [Official Secure MCP Tunnel setup](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
 
 ## Ngrok: restricted authenticated clients
 

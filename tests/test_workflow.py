@@ -8,8 +8,8 @@ from clearline.worker import run_one, worker_lock
 def test_edit_invalidates_approval_and_blocks_old_action(store,draft):
     store.decide(draft["id"],True)
     new_id = store.revise_draft(draft["id"],"changed@example.invalid","New subject","New content")
-    with pytest.raises(ValueError,match="approval"):
-        store.deliver(store.claim())
+    assert store.claim() is None
+    assert store.rows("SELECT status FROM jobs WHERE kind='deliver'")==[{"status":"cancelled"}]
     assert not store.rows("SELECT * FROM outbox")
     assert store.rows("SELECT status FROM drafts WHERE id=?",(new_id,))[0]["status"] == "awaiting_approval"
 
@@ -32,13 +32,17 @@ def test_simulated_delivery_retry_is_idempotent_and_reply_cancels_followup(store
     assert store.rows("SELECT provenance FROM outcomes")[0]["provenance"] == "manual_demo_input"
 
 
-def test_reply_while_agent_running_prevents_new_draft(store,opportunity,decision):
-    store.queue_analysis("example")
+def test_reply_while_agent_running_prevents_new_draft(store,draft,decision):
+    store.decide(draft['id'],True)
+    delivery=store.claim()
+    store.deliver(delivery)
+    store.finish(delivery['id'])
+    store.queue_analysis("example",followup_of=draft['id'],investigation=True)
     job = store.claim()
     store.record_outcome("example","reply","Stop follow-up")
     store.save_analysis(job,decision)
-    assert not store.rows("SELECT * FROM drafts")
-    assert store.rows("SELECT status FROM jobs")[0]["status"] == "cancelled"
+    assert not store.rows("SELECT * FROM drafts WHERE status='awaiting_approval'")
+    assert store.rows("SELECT status FROM jobs WHERE id=?",(job['id'],))[0]["status"] == "cancelled"
 
 
 def test_changed_scan_evidence_blocks_approval(store,draft,opportunity):

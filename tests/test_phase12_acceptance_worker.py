@@ -279,8 +279,10 @@ def test_claim_leaves_unselected_queue_jobs_unchanged(tmp_path, ledger):
     other = store.enqueue('revenue_brief', {'source_hash': 'other'}, key='other')
     selected = store.enqueue('revenue_brief', {'source_hash': 'selected'}, key='selected')
     runner = worker.AcceptanceStore(store.path, [selected], ledger)
+    assert runner.claim(['analyze']) is None
     result = runner.claim(worker.KINDS)
     assert result['id'] == selected
+    assert result['status'] == 'running' and result['started_at'] and result['finished_at'] is None
     assert runner.claim(worker.KINDS) is None
     assert store.rows('SELECT status,attempts FROM jobs WHERE id=?', (other,)) == [{'status': 'queued', 'attempts': 0}]
 

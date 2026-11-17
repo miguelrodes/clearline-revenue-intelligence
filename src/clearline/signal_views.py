@@ -33,7 +33,7 @@ def members(store,key,accounts=None):
 
 
 def signal_context(store):
-    rows=opportunities(store);segments=financial_segments(store)
+    rows=opportunities(store);segments=financial_segments(store,rows)
     return [{**s,'dispositions':dict(Counter(disposition(a) for a in members(store,s['key'],rows))),
              'recommendations':list(dict.fromkeys(a['recommended_action'] for a in members(store,s['key'],rows) if a['recommended_action']))[:5]}
             for s in segments]

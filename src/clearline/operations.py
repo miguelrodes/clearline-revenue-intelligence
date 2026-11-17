@@ -110,10 +110,24 @@ def campaign_view(store, cid):
     pending=sum(m['job_status'] in ('queued','running') for m in members)
     status=rows[0]['status']
     if status=='preparing' and not pending: status='awaiting_approval' if any(m['ready'] for m in members) else 'needs_review'
+    # Attribute activity through the campaign recorded on the delivered message.
+    # Backfilled conversation records can predate the campaign itself.
+    activity = store.rows("""
+        WITH deliveries AS (
+            SELECT b.id, b.draft_id FROM outbox b
+            JOIN messages m ON m.outbox_id=b.id AND m.direction='outbound'
+            JOIN campaign_accounts c ON c.opportunity_id=b.opportunity_id
+            JOIN campaigns campaign ON campaign.id=c.campaign_id
+            WHERE c.campaign_id=? AND c.exclusion IS NULL AND b.created_at>=campaign.created_at
+              AND EXISTS (SELECT 1 FROM json_each(m.campaign_ids) WHERE value=c.campaign_id)
+        )
+        SELECT (SELECT COUNT(*) FROM deliveries) AS simulated_deliveries,
+               (SELECT COUNT(*) FROM jobs WHERE kind='followup' AND status='queued'
+                AND json_extract(payload,'$.parent_draft_id') IN (SELECT draft_id FROM deliveries)) AS scheduled_followups,
+               (SELECT COUNT(*) FROM outcome_outreach WHERE outbox_id IN (SELECT id FROM deliveries)) AS recorded_outcomes
+    """, (cid,))[0]
     return {**rows[0],'status':status,'members':members,'pending':pending,
-            'simulated_deliveries':store.rows('SELECT COUNT(*) n FROM outbox b JOIN campaign_accounts c ON c.opportunity_id=b.opportunity_id WHERE c.campaign_id=?',(cid,))[0]['n'],
-            'scheduled_followups':store.rows("SELECT COUNT(*) n FROM jobs j JOIN campaign_accounts c ON c.opportunity_id=j.opportunity_id WHERE c.campaign_id=? AND j.kind='followup' AND j.status='queued'",(cid,))[0]['n'],
-            'recorded_outcomes':store.rows('SELECT COUNT(*) n FROM outcomes o JOIN campaign_accounts c ON c.opportunity_id=o.opportunity_id WHERE c.campaign_id=?',(cid,))[0]['n'],
+            **activity,
             'ready':sum(m['ready'] for m in members),'historical_decline_cents':sum(m['decline_cents'] for m in members if not m['exclusion'])}
 
 
@@ -144,17 +158,18 @@ def decide_campaign(store,cid,snapshots,approve):
         store.event('campaign_human_decision',{'campaign_id':cid,'approve':approve,'draft_ids':[s['draft_id'] for s in snapshots]},con=con)
 
 
-def financial_segments(store):
+def financial_segments(store, accounts=None):
     from .reporting import opportunities
-    rows=opportunities(store); result=[]
+    rows=opportunities(store) if accounts is None else accounts; result=[]
     for key in ('inactivity','partial','product_decline','direct_gap_channel_review'):
         group=[r for r in rows if (r['partial_decline'] if key=='partial' else key in r['signals'])]
         amount=sum(r['decline_cents'] for r in group)
         prior=sum(r['prior_cents'] for r in group); current=sum(r['current_cents'] for r in group)
         if key=='product_decline':
             pairs=[]
-            for r in group:
-                e=store.opportunity(r['id'])['evidence']; skus={s['sku'] for s in e['signals'] if s['type']==key}
+            ids=json.dumps([r['id'] for r in group])
+            for row in store.rows('SELECT evidence FROM opportunities WHERE id IN (SELECT value FROM json_each(?))',(ids,)):
+                e=json.loads(row['evidence']); skus={s['sku'] for s in e['signals'] if s['type']==key}
                 pairs.extend(p for p in e['products'] if p['sku'] in skus)
             prior=sum(p['prior_cents'] for p in pairs); current=sum(p['current_cents'] for p in pairs)
             amount=sum(max(0,p['prior_cents']-p['current_cents']) for p in pairs)

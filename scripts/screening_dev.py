@@ -9,8 +9,8 @@ from clearline.store import Store
 from clearline.screening import screen
 
 PREVIEW_JOB_KINDS = (
-    'analyze', 'prepare', 'reply', 'revise_draft', 'followup', 'deliver',
-    'revenue_brief',
+    'analyze', 'prepare', 'reply', 'revise_draft', 'review_sent', 'followup', 'deliver',
+    'revenue_brief', 'pipeline_discover', 'pipeline_research', 'pipeline_qualify',
     'agency_scan', 'agency_qualify', 'agency_outreach', 'agency_deliver',
 )
 
@@ -31,18 +31,24 @@ def run_preview_worker(store,settings,*,drain=False):
         # Resume only already-requested work owned by this preview. Never create
         # scan jobs, invalidate evidence, or enqueue missing portfolio reviews.
         with store.connect(write=True) as con:
-            placeholders=','.join('?' for _ in PREVIEW_JOB_KINDS)
-            con.execute(f"UPDATE jobs SET status='queued',error='Recovered isolated preview worker' WHERE status='running' AND kind IN ({placeholders})",PREVIEW_JOB_KINDS)
+            only_delivery=con.execute("SELECT 1 FROM controls WHERE name='delivery_only' AND value='1'").fetchone()
+            kinds=('deliver','agency_deliver') if only_delivery else PREVIEW_JOB_KINDS
+            placeholders=','.join('?' for _ in kinds)
+            con.execute(f"UPDATE jobs SET status='queued',error='Recovered isolated preview worker' WHERE status='running' AND kind IN ({placeholders})",kinds)
         # Both controls matter: auto_brief=False disables source refresh,
         # portfolio catch-up and automatic briefs; an allowlist disables tick().
-        asyncio.run(run_pool(store,settings,drain=drain,auto_brief=False,kinds=PREVIEW_JOB_KINDS))
+        asyncio.run(run_pool(store,settings,drain=drain,auto_brief=False,kinds=PREVIEW_JOB_KINDS,preview_delivery=True))
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('command',choices=['screen','api','worker']);p.add_argument('--env-file',type=Path);p.add_argument('--enable-screening',action='store_true');p.add_argument('--port',type=int,default=8002);p.add_argument('--db-path',type=Path,help='Database inside this checkout\'s runtime directory; use the same path for API and worker');args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('command',choices=['screen','api','worker','delivery-on','delivery-off']);p.add_argument('--env-file',type=Path);p.add_argument('--enable-screening',action='store_true');p.add_argument('--port',type=int,default=8002);p.add_argument('--db-path',type=Path,help='Database inside this checkout\'s runtime directory; use the same path for API and worker');args=p.parse_args()
     settings=configuration(args.env_file,args.enable_screening,args.db_path)
     if not settings.screening_enabled and args.command!='api':raise SystemExit('Review feature disabled. Pass --enable-screening explicitly in this isolated worktree.')
     store=Store(settings.db_path)
-    if args.command=='screen':print(screen(store,settings))
+    if args.command in ('delivery-on','delivery-off'):
+        enabled=args.command=='delivery-on'
+        store.set_delivery_only(enabled)
+        print('Approved simulated delivery enabled for the preview worker.' if enabled else 'Automatic simulated delivery disabled.')
+    elif args.command=='screen':print(screen(store,settings))
     elif args.command=='api':
         import uvicorn
         from clearline.api import create_app

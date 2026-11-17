@@ -115,7 +115,12 @@ def detect(e,orders,association_rows=(),policy=CommercialPolicy()):
 def eligibility(store,oid):
     rows=store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=? AND authorized=1',(oid,))
     if not rows:return {'eligible':False,'reason':'No authorized recipient and relationship route recorded','authorization':None}
-    r=rows[0];return {'eligible':True,'reason':'Human-recorded relationship authorization','authorization':r}
+    r=rows[0]
+    from .outreach_controls import restriction
+    with store.connect() as con:
+        if restriction(con,oid,r['recipient']):
+            return {'eligible':False,'reason':'A saved outreach restriction covers this recipient','authorization':r}
+    return {'eligible':True,'reason':'Human-recorded relationship authorization','authorization':r}
 
 
 def workflow_control_task(task):
@@ -126,6 +131,7 @@ def workflow_control_task(task):
     Mixed tasks verifying a recipient, identity or order remain business tasks.
     """
     import re
+    from .task_purpose import agent_managed_task
     title=task['title'].strip().casefold()
     patterns=(r'^(?:after authorization,\s*)?obtain separate .*approval',
               r'^review(?: and separately approve)? (?:the )?(?:existing|pending)\b.*\b(draft|proposal)\b',
@@ -133,7 +139,7 @@ def workflow_control_task(task):
               r'^(?:gate|keep|flag) (?:the )?(?:existing|pending|awaiting-approval)\b.*\bdraft\b',
               r'^resolve (?:the )?pending\b.*\bdraft',
               r'^hold (?:the )?pending draft\b')
-    return any(re.search(pattern,title) for pattern in patterns)
+    return agent_managed_task(task) or any(re.search(pattern,title) for pattern in patterns)
 
 
 def decision_issues(plan,access):
@@ -147,7 +153,7 @@ def decision_issues(plan,access):
         if task.get('existing_task_id'):
             old=access.store.rows("SELECT evidence_refs FROM investigation_tasks WHERE id=? AND opportunity_id=? AND status='pending'",(task['existing_task_id'],access.oid))
             if not old or set(json.loads(old[0]['evidence_refs']))!=set(task['evidence_refs']):issues.append('Reuse only an existing pending task for this account with the exact same evidence scope')
-    if any(workflow_control_task(t) for t in plan['verification_tasks']):issues.append('Remove draft-review, holding and approval-only tasks. Existing workflow controls perform those steps; investigation tasks must request missing business facts, never require approval before a new proposal can be prepared.')
+    if any(workflow_control_task(t) for t in plan['verification_tasks']):issues.append('Remove draft-review, holding and approval-only tasks and agent-only reinterpretation of purchasing evidence. The system performs those steps. Ask people only for missing business facts; do not ask them to reassess the account.')
     if outcome=='contact':
         auth=eligibility(access.store,access.oid)
         if not auth['eligible']:issues.append(auth['reason'])
@@ -164,8 +170,11 @@ def decision_issues(plan,access):
             if not resolved:issues.append('Investigate credit reason and resolution internally before credit-led contact')
     return issues
 
-def execution_issues(con,oid,analysis):
+def execution_issues(con,oid,analysis,*,reviewing_message=''):
     issues=[]
+    from .outreach_controls import restriction,pending_reply
+    if restriction(con,oid,analysis.get('recipient')):issues.append('A saved outreach restriction covers this recipient')
+    if pending_reply(con,oid,reviewing_message):issues.append('An incoming customer reply is still being reviewed')
     if any(not workflow_control_task(t) for t in con.execute("SELECT title FROM investigation_tasks WHERE opportunity_id=? AND blocking=1 AND status='pending'",(oid,))):issues.append('Blocking investigation prerequisites remain unresolved')
     auth=con.execute('SELECT * FROM contact_authorizations WHERE opportunity_id=? AND authorized=1',(oid,)).fetchone()
     if not auth or auth['recipient']!=analysis.get('recipient') or auth['route']!=(analysis.get('commercial_plan') or {}).get('route'):issues.append('Recipient/channel authorization is missing or changed')
@@ -233,3 +242,19 @@ def refresh_message_signals(con,oid,now):
             evidence=json.dumps({'basis':'Simulated customer statement candidate; verify meaning, current relevance and negation','message_ref':'message:'+m['id'],'quote':m['body'],'created_at':m['created_at'],'simulated':True,'sku':key if category=='cross_sell' else None},sort_keys=True)
             con.execute("""INSERT INTO commercial_signals VALUES(?,?,?,?,?,NULL,1,'pending',NULL,NULL,NULL,?)
              ON CONFLICT(id) DO UPDATE SET active=1,evidence=excluded.evidence,updated_at=excluded.updated_at""",(sid,oid,category,trigger,evidence,now))
+
+
+def verified_task_finding(store,con,task_id,resolution):
+    """Resolve only this existing pending task with a verified finding; caller owns the write transaction."""
+    from .store import utcnow
+    from .task_purpose import task_purpose
+    if not resolution.strip():raise ValueError('Explain the verified finding; completion alone is not evidence')
+    task=con.execute("SELECT * FROM investigation_tasks WHERE id=? AND status='pending'",(task_id,)).fetchone()
+    if not task:raise ValueError('Pending investigation task not found')
+    oid=task['opportunity_id']
+    if task_purpose(task)['contact_resolvable']:
+        raise ValueError('Verify the recipient and permitted purchasing route for this check in Contact Clearance. A finding alone cannot clear it.')
+    con.execute('INSERT INTO investigation_resolutions VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET resolution=excluded.resolution,updated_at=excluded.updated_at',(task_id,oid,resolution,utcnow()))
+    con.execute("UPDATE investigation_tasks SET status='resolved' WHERE id=?",(task_id,))
+    store.event('investigation_resolved',{'task_id':task_id,'resolution':resolution},opportunity_id=oid,con=con)
+    return task

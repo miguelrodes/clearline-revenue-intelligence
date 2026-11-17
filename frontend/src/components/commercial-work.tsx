@@ -1,16 +1,18 @@
 "use client";
+import {PracticalActions} from './practical-actions';
 import {useState} from 'react';
 import type {SavedCommercialSignal} from '@/lib/types';
 import {verificationExplanation} from '@/lib/account-presentation';
 import {useApi,request,refresh,label} from '@/lib/api';
 import {ContactClearanceEditor,isPurchasingContactTask,type ContactWorkData} from './contact-clearance';
 
-export function CommercialWork({id,signals=[]}:{id:string;signals?:SavedCommercialSignal[]}){
- const {data,error}=useApi<ContactWorkData>(`/accounts/${id}/commercial-work`);
+export function CommercialWork({id,signals=[],loaded,loadError}:{id:string;signals?:SavedCommercialSignal[];loaded?:ContactWorkData;loadError?:string}){
+ const remote=useApi<ContactWorkData>(loaded||loadError!==undefined?null:`/accounts/${id}/commercial-work`);const data=loaded??remote.data,error=loadError??remote.error;
  const [answers,setAnswers]=useState<Record<string,string>>({});const [message,setMessage]=useState('');const [busy,setBusy]=useState(false);
  async function run(path:string,body:unknown){setBusy(true);try{const result=await request<{requires_reassessment:boolean}>(path,'POST',body);setMessage(result.requires_reassessment?'Finding recorded. A review of this account is queued; other checks remain open.':'Finding recorded. The existing assessment is unchanged.');refresh()}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}}
  if(error)return <p role="alert" className="notice">What Needs Verification could not load: {error}</p>;
  if(!data?.tasks||!data?.signals?.signals)return null;
+ if(Array.isArray(data.practical_actions))return <section id="commercial-work" className="panel commercial-work-panel"><div className="panel-head"><h2>What Needs Verification</h2></div><PracticalActions oid={id} work={data} inquiries={data.inquiry_data}/></section>;
  const contactTasks=data.tasks.filter(isPurchasingContactTask);const task=contactTasks[0];const otherTasks=data.tasks.filter(t=>!isPurchasingContactTask(t));
  const savedContact=Boolean(data.contact_clearance||data.authorizations.length);
  return <section id="commercial-work" className="panel commercial-work-panel"><div className="panel-head"><h2>What Needs Verification</h2></div><div className="content-stack">

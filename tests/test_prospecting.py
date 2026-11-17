@@ -182,3 +182,38 @@ def test_both_workflows_render_with_independent_approval_controls(store,settings
     app.switch_page("views/recovery.py").run()
     assert app.title[0].value == "Customer Recovery Agent"
     assert next(t for t in app.text_input if t.label=="Subject").value == draft["subject"]
+
+
+def test_discovered_prospect_requires_exact_authorized_recipient_for_approval_and_delivery(store, settings, prospect, research, report):
+    """Independent guards on approval and delivery; only a disposable fixture is used."""
+    from dataclasses import replace
+    import json
+    from clearline.services import ApplicationService
+    from clearline.reporting import valid_draft
+    from clearline.store import utcnow
+
+    store.queue_prospect(prospect)
+    store.save_prospect_research(store.claim(), research)
+    job = store.claim()
+    store.save_analysis(job, report)
+    with store.connect(write=True) as con:
+        con.execute("UPDATE opportunities SET evidence=json_set(evidence,'$.profile.origin','real_web') WHERE id=?", (prospect,))
+    svc = ApplicationService(replace(settings, screening_enabled=True),store)
+    old = store.rows("SELECT * FROM drafts WHERE opportunity_id=?", (prospect,))[0]
+    assert not valid_draft(store,old)
+    with pytest.raises(ValueError,match='Verify the purchasing contact'):
+        store.decide(old['id'],True)
+    with pytest.raises(ValueError,match='route'):
+        svc.authorize_prospect(prospect,'purchasing@example.org','Buyer','distributor','Fictional test verification',True)
+    svc.authorize_prospect(prospect,'purchasing@example.org','Buyer','direct','Fictional test verification',True)
+    draft = store.rows("SELECT * FROM drafts WHERE status='awaiting_approval'")[0]
+    assert draft['version'] == old['version']+1 and draft['body']==old['body']
+    assert json.loads(draft['analysis'])['recipient']=='purchasing@example.org'
+    assert valid_draft(store,draft) and not store.rows('SELECT * FROM approvals')
+    store.decide(draft['id'],True)
+    delivery = store.claim(['deliver'])
+    with store.connect(write=True) as con:
+        con.execute("UPDATE contact_authorizations SET authorized=0,updated_at=? WHERE opportunity_id=?",(utcnow(),prospect))
+    with pytest.raises(ValueError,match='recipient or buying route'):
+        store.deliver(delivery)
+    assert not store.rows('SELECT * FROM outbox')

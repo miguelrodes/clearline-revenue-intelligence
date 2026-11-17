@@ -25,7 +25,7 @@ from clearline.store import Store, utcnow
 from clearline.telemetry import PRICES
 
 REQUESTS_PER_JOB = 32
-KINDS = ('analyze', 'revenue_brief')
+KINDS = ('analyze', 'reply', 'revenue_brief')
 INPUT_SAFETY_TOKENS = 256
 CACHE_WRITE_MULTIPLIERS = {'30m': 1.25, '12h': 2.5}
 # Accepted by the installed Responses input_tokens.count SDK, including all
@@ -75,6 +75,7 @@ def isolated_path(path):
 
 class Ledger:
     """Separate from both business databases and the Phase 3 budget ledger."""
+    kinds = KINDS
     def __init__(self, path):
         self.path = Path(path)
 
@@ -119,7 +120,7 @@ class Ledger:
         with self.connect() as con:
             meta = dict(con.execute('SELECT key,value FROM metadata').fetchall())
             kind, account = job['kind'], job.get('opportunity_id')
-            if kind not in KINDS or (kind == 'analyze' and account not in json.loads(meta['accounts'])):
+            if kind not in self.kinds or (kind != 'revenue_brief' and account not in json.loads(meta['accounts'])):
                 raise BudgetLimit('Only selected customer reassessments and manual briefs are permitted')
             if kind == 'revenue_brief' and account is not None:
                 raise BudgetLimit('Unexpected account-bound briefing job')
@@ -130,11 +131,17 @@ class Ledger:
                 if old['kind'] != kind or old['account_id'] != account:
                     raise BudgetLimit('Admitted job identity changed')
                 return
-            if kind == 'analyze' and con.execute('SELECT 1 FROM admitted_jobs WHERE kind=? AND account_id=?', (kind, account)).fetchone():
-                raise BudgetLimit('One targeted reassessment per selected account is permitted')
-            if kind == 'revenue_brief' and con.execute('SELECT COUNT(*) FROM admitted_jobs WHERE kind=?', (kind,)).fetchone()[0] >= 2:
-                raise BudgetLimit('At most two manually selected briefing jobs are permitted')
+            self.check_new_job(con,job)
             con.execute('INSERT INTO admitted_jobs VALUES(?,?,?)', (job['id'], kind, account))
+
+    def check_new_job(self,con,job):
+        kind, account = job['kind'],job.get('opportunity_id')
+        if kind == 'analyze' and con.execute('SELECT 1 FROM admitted_jobs WHERE kind=? AND account_id=?', (kind, account)).fetchone():
+            raise BudgetLimit('One targeted reassessment per selected account is permitted')
+        if kind == 'reply' and con.execute("SELECT count(*) FROM admitted_jobs WHERE kind='reply'").fetchone()[0] >= 3:
+            raise BudgetLimit('At most three selected reply scenarios are permitted')
+        if kind == 'revenue_brief' and con.execute('SELECT COUNT(*) FROM admitted_jobs WHERE kind=?', (kind,)).fetchone()[0] >= 2:
+            raise BudgetLimit('At most two manually selected briefing jobs are permitted')
 
     def authorize_restart(self, job):
         """One explicit restart after the obsolete input-size guard, never retry automatically.
@@ -361,6 +368,7 @@ class Ledger:
                     price_basis='Standard generation rates including cache writes; count preflights reported separately; estimated, not an OpenAI billing invoice')
 
 def usage_stage(job, body):
+    if job['kind']=='review_sent':return 'post_send_review'
     if job['kind'] == 'revenue_brief':
         return 'manual_briefing'
     from clearline.commercial_agent import STRATEGY, SUPERVISOR, COMMUNICATION, COMM_REVIEW
@@ -443,7 +451,10 @@ def bounded_clients(ledger):
     @asynccontextmanager
     async def wrapped(store, job, settings):
         ledger.admit(job)
-        async with original(store, job, settings) as client:
+        from clearline.demo import CONVERSATION_SESSION
+        path = getattr(store,'path',None)
+        options = {'_guarded_ledger':ledger.path.resolve()} if path and path.resolve()==CONVERSATION_SESSION else {}
+        async with original(store, job, settings, **options) as client:
             http = client._client
             select = http._transport_for_url
             http._transport_for_url = lambda url: GuardedTransport(select(url), store, job, settings)
@@ -454,14 +465,18 @@ def bounded_clients(ledger):
 
     # brief.py binds client_for at import time, unlike commercial_agent.py.
     import clearline.brief as brief
+    import clearline.reply_agent as replies
     prior_brief_client = brief.client_for
+    prior_reply_client = replies.client_for
     telemetry.client_for = wrapped
     brief.client_for = wrapped
+    replies.client_for = wrapped
     try:
         yield
     finally:
         telemetry.client_for = original
         brief.client_for = prior_brief_client
+        replies.client_for = prior_reply_client
 
 
 class AcceptanceStore(Store):
@@ -475,19 +490,24 @@ class AcceptanceStore(Store):
         # is never claimed, changed, or sent to an agent by this acceptance worker.
         conditions = ' OR '.join('(j.id=? AND j.attempts=?)' for _ in self.selected_ids)
         params = tuple(value for jid in self.selected_ids for value in (jid, 1 if jid in self.restart_ids else 0))
+        eligible_kinds = tuple(kind for kind in KINDS if kinds is None or kind in kinds)
+        if not eligible_kinds or not self.selected_ids:
+            return None
+        placeholders = ','.join('?' for _ in eligible_kinds)
         with self.connect(write=True) as con:
             row = con.execute(f'''SELECT j.* FROM jobs j WHERE ({conditions})
-                AND j.status='queued' AND j.due_at<=?
+                AND j.status='queued' AND j.kind IN ({placeholders}) AND j.due_at<=?
                 AND NOT EXISTS (SELECT 1 FROM jobs a WHERE a.status='running'
                   AND (a.kind='scan' OR (j.opportunity_id IS NOT NULL AND a.opportunity_id=j.opportunity_id)))
-                ORDER BY j.created_at,j.rowid LIMIT 1''', (*params, utcnow())).fetchone()
+                ORDER BY j.created_at,j.rowid LIMIT 1''', (*params, *eligible_kinds, utcnow())).fetchone()
             if row is None:
                 return None
             job = dict(row)
             self.ledger.admit(job)
-            con.execute("UPDATE jobs SET status='running',started_at=?,attempts=attempts+1,error=NULL WHERE id=?", (utcnow(), job['id']))
+            started = utcnow()
+            con.execute("UPDATE jobs SET status='running',started_at=?,finished_at=NULL,attempts=attempts+1,error=NULL WHERE id=?", (started, job['id']))
             job['payload'] = json.loads(job['payload'])
-            job['attempts'] += 1
+            job.update(status='running', started_at=started, finished_at=None, error=None, attempts=row['attempts']+1)
             return job
 
 

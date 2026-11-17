@@ -1,71 +1,72 @@
-# Repeatable customer conversation demo
+# Customer conversation rehearsal
 
-Implemented locally on November 12, 2026. The existing Next.js, FastAPI, Python Agents SDK, SQLite, worker and approval flow are reused. No real email provider is configured or implemented.
+Open [Lone Tree in the isolated preview](http://127.0.0.1:3002/accounts/c966fd651cca1e9020fa). The combined preview has its own database and runs on ports 3001 and 8002. The rehearsal uses ports 3002 and 8003 with the same Next.js interface, FastAPI, SQLite and customer workflow.
 
-## Starting state and reset
+## Run the conversation through ChatGPT Web
 
-The registered disposable database is `runtime/demo/session.sqlite3`; its separate baseline is `runtime/demo/baseline.sqlite3`. The original `runtime/clearline.sqlite3` and all four supplied CSVs remain unchanged. Tests verified their file hashes.
+Select **Clearline Demo** in a fresh ChatGPT Web conversation. The dashboard is optional. The opening message is:
 
-The reset restores **51 pending recovery emails**, including **ID DOC – Lone Tree**, 2 earlier recovery sends with follow-up examples, 392 assessed verification records, and 41 no-action records. All 486 recovery records retain their saved assessments. The separate real-prospect records remain separate. Lone Tree starts with its saved version 1, no approvals or conversation messages in the disposable copy, and its existing financial evidence. Juniper Hills retains its open-order hold.
+> Use Clearline Demo. What should I do to recover sales from ID DOC – Lone Tree in Idaho? Show the purchasing change, what is blocking outreach, and my next step. Read the saved records and stop before making any changes.
 
-Run from a terminal:
+| Step | What to say or check | MCP tools |
+| --- | --- | --- |
+| 1. Retrieve | Expect a $50,225 January–October purchasing decline and a check for the purchasing contact and buying route. Two older draft versions are superseded. | `query_accounts`, `get_account` (summary and evidence), `get_orders` |
+| 2. Verify | Use the verification message below. The result should identify the resolved contact check and one Lone Tree assessment job. | `record_contact_authorization`, `get_job` or `list_jobs` |
+| 3. Review | “When that job finishes, show me the latest recommendation, why it was chosen, the exact subject and entire email body, the intended contact, and the simulator destination. Wait for my decision.” If the job recommends a hold, ask for its reason. | `get_job`, `get_account` (summary and drafts), `get_draft`, `review_outreach` |
+| 4. Edit or approve | Optionally request specific edits first. Let any edit quality check finish and review the latest version. In a separate turn, say “I approve **the version you just showed me** for simulated delivery.” | `edit_draft`, `list_jobs`, `get_draft`, `review_outreach`, then `decide_outreach` with the current review ID |
+| 5. Confirm delivery | “Show the saved receipt, where it went, and the account status.” Expect one outbox record for that approved draft, delivered to `simulation@example.invalid`, and **Awaiting response**. | `execute_approved_sends` (reads delivery status), `get_account` (outbox), `get_conversation` |
+| 6. Supply a reply | “Treat the following as a fictional reply to the delivered Lone Tree email. Record my exact words once, then tell me when interpretation finishes.” Append your own reply. The tool links it to the outbound message ID and deduplicates retries using the same caller-generated message ID. | `get_conversation`, `simulate_customer_reply`, `get_job` |
+| 7. Read the decision | “What changed with Lone Tree, and what should I do next? Show the saved interpretation, restrictions, any active reminder or draft, and how today's priorities changed.” Check the newest conversation and current job state. | `get_conversation`, `get_account`, `list_jobs`, `get_draft` if present, `get_brief`, `list_actions` |
 
-```bash
-cd /Users/miguelrodes/Code/clearline-revenue-intelligence
-.venv/bin/python scripts/reset_demo.py
-.venv/bin/python -m clearline.demo serve
+**Verification message for step 2**
+
+> For this fictional rehearsal, I verify and authorize purchasing.lonetree@example.org as the Current purchasing coordinator for Lone Tree. The buying route is Direct. Evidence: “Synthetic rehearsal only. The internal purchasing directory and fictional permission record confirm this coordinator can discuss resuming direct purchases of CL-MAIL50 and CL-FS10.” Record this against the pending purchasing-contact check. Let its one targeted reassessment run, then show me the result. Stop before approving anything.
+
+An email address alone cannot clear the check. When reviewing a draft, the intended contact is `purchasing.lonetree@example.org`; the simulator receives the approved text at `simulation@example.invalid`. A changed draft requires a new review and human approval. If a job is still running, ask ChatGPT to check that same job ID. A second investigation is unnecessary.
+
+## Replay three different replies
+
+Wait until the active job finishes. **Before each scenario**, run the sent-checkpoint command below on your Mac and open a fresh ChatGPT conversation with Clearline Demo. Ask “Show Lone Tree's delivered email and pending reminder.” Each replay should show the same approved **version 3**, subject **Lone Tree: current requirements for CL-MAIL50 and CL-FS10**, one simulated delivery, and no incoming reply. This checkpoint contains the previously delivered message even if the live contact-verification exercise generated different wording.
+
+Then follow steps 6 and 7. Use any text you like. Compare the resulting action with these expectations:
+
+- **Renewed interest.** Give the new coordinator's reply and express interest in discussing current requirements. Look for a relevant next step, with any new draft awaiting approval.
+- **Distributor transition.** Say the institution still uses the products and now buys through a regional distributor. Check that direct reorder outreach stops and the agent recognizes the buying-route change.
+- **Explicit opt-out.** Say the institution switched suppliers and wants no further contact from Clearline. Check the saved restriction, canceled reminders, and absence of a sendable draft.
+
+For permission and finances, `get_agent_status` shows the worker and its **rehearsal_budget**. The new interactive session has a $2 cumulative ceiling across assessments, edit reviews, and reply interpretation. The worker reserves the maximum priced cost of each request before dispatch and settles it from returned usage. Pending or indeterminate charges block further paid requests. Restoring either checkpoint preserves charges and reservations. If a job reports **blocked_config**, read its reason and remaining budget. These limits apply only to this conversation rehearsal.
+
+## Optional dashboard walkthrough
+
+1. In **Next Action**, open the purchasing-contact check. The form reuses saved details and asks for the missing prerequisites. For this fictional exercise, use `purchasing.lonetree@example.org`, role **Current purchasing coordinator**, and **Direct**. For the evidence, enter “Synthetic rehearsal only. The internal purchasing directory and fictional permission record confirm this coordinator can discuss resuming direct purchases of CL-MAIL50 and CL-FS10.” Saving only the email leaves the check open. Choose the verification action after supplying the role, route and evidence.
+2. Stay on the account. The worker reviews the new information and the page updates automatically. A commercially justified draft appears under **Next Action**. Read it, choose **Approve simulated send**, then **Confirm**. Any edit requires approval of the exact updated version. Delivery is recorded at `simulation@example.invalid`.
+3. To simulate an incoming reply, use the connected ChatGPT rehearsal as described above. **Customer Conversations** on the profile shows the recorded exchange and its AI interpretation.
+4. Below the customer’s name, choose **Pause outreach** for a temporary hold or **Do not contact** to record an opt-out for one recipient or the entire account. Record the reason. A pause can have a reconsideration date and requires manual resumption.
+
+[Cedar County](http://127.0.0.1:3002/accounts/9eac704f6ec1cf882ead) has an earlier delivered email and supports a simulated reply. [Sheridan County](http://127.0.0.1:3002/accounts/4fffd02df80780e4c74c) has a no-action decision and no outbound email to reply to. Later-phase evidence is available in [Prospect Screening](http://127.0.0.1:3002/screening) and the saved [Pennsylvania prospect profile](http://127.0.0.1:3002/accounts/2dc5f09907f6e34e3171).
+
+## Reset or start the rehearsal on this Mac
+
+Run these commands from Terminal. They stop only the registered rehearsal, restore its original copy, and start its services. Resetting uses zero model calls. Leave the Terminal window open while using the demo.
+
+```sh
+cd "/Users/miguelrodes/Documents/New project/clearline-integration"
+/Users/miguelrodes/Code/clearline-revenue-intelligence/.venv/bin/python scripts/conversation_demo.py reset --start --env-file /Users/miguelrodes/Code/clearline-revenue-intelligence/.env
 ```
 
-Leave the second command running and refresh http://127.0.0.1:3000/. The frontend runs separately; if needed, start it in another terminal with `npm --prefix frontend run start` from the same folder. `python3 scripts/reset_demo.py` also works: the wrapper selects the repository virtual environment.
+To start each reply replay directly after the approved email, run the following from the same directory in an available Terminal window. Wait for the services to start before reading the account again in ChatGPT.
 
-Reset verifies the registered paths and baseline checksum, coordinates shutdown of the registered API and worker, archives the old rehearsal under `runtime/demo/history/`, and restores the known baseline. Independently launched processes holding the demo lease must be stopped first. Follow-up dates shift relative to the reset date. Financial assessments and compatible briefing wording are reused; no portfolio-wide AI analysis is required. Each rehearsal remains available in the archives. Do not use `capture` during a rehearsal: it deliberately replaces the baseline.
+```sh
+/Users/miguelrodes/Code/clearline-revenue-intelligence/.venv/bin/python scripts/conversation_demo.py reset --sent --start --env-file /Users/miguelrodes/Code/clearline-revenue-intelligence/.env
+```
 
-## Five-minute demonstration
+To finish at the original missing-contact baseline, run the first reset command again. To restart services while keeping current work, use `serve` after stopping the rehearsal. The worker takes new assessments, replies, edit reviews, and approved simulated deliveries for the accounts registered in the rehearsal budget. Lone Tree is registered initially. To select or replace the second existing customer, pause and stop the rehearsal, run `scripts/conversation_demo.py select-account --account-id ID` with the project Python, then use `serve`. The cumulative $2 cap and all recorded charges carry across selections. To run just one queued assessment, reply or revision while the rest stay paused, stop the rehearsal, select the account, and run `scripts/conversation_demo.py run-job --job-id ID --env-file ENV_FILE` before restarting with `serve`. It leaves inherited jobs and scheduled reminders in place for inspection. All reply interpretations use the real agent and the actual text entered.
 
-1. Open http://127.0.0.1:3000/accounts/c966fd651cca1e9020fa or search for **Lone Tree**. Its comparable January–October purchasing declined by $50,225. The saved recommendation first checks the contact and purchasing route; it does not assume the whole decline is recoverable.
-2. In **Next action**, review version 1 and choose **Approve simulated send**, then **Confirm**. The worker saves the approved email into the simulated conversation.
-3. In **Customer conversation**, expand **Demo control · simulate a customer reply**. Select the outbound message. Choose an optional example or write your own fictional reply. The examples only fill editable text; they do not supply an AI classification.
-4. Choose **Inject reply & run AI**. A real OpenAI call interprets that text. The panel displays progress, the exact incoming text, extracted facts, uncertainties, result and commercial next step. The old unanswered-email reminder is canceled immediately.
-5. For a reorder, training, or contact-change request, inspect the response under **Next action**. It remains unsent until you separately approve and confirm that exact saved version. The second simulated outbound message links to the inbound reply and completes its associated task.
-6. For distributor purchasing, the agent records a channel question, pauses direct outreach and creates an internal next-step task. For rejection or opt-out, outreach stops and no response draft is created. The Action Center surfaces pending customer-request tasks and prepared reply approvals.
-7. Run reset again. Lone Tree returns to version 1 awaiting approval. New replies, response drafts, approvals and simulated deliveries from the rehearsal are absent from the active database, but retained in the rehearsal archive.
+For a fresh checkout with the source-derived combined database present, initialize and build before the first start. Use the project’s existing Python environment.
 
-The browser walkthrough tested the original email, fictional night-shift training reply, real agent execution, a separately approved training response, and the linked three-message conversation. The restored app is ready to repeat this sequence.
+```sh
+python scripts/conversation_demo.py init
+(cd frontend && CLEARLINE_NEXT_DIST_DIR=.next-conversation CLEARLINE_API_ORIGIN=http://127.0.0.1:8003 npm run build -- --webpack)
+```
 
-## Behavior and safeguards
-
-- `ReplyDecision` is a strict structured output, covering intent, customer statements, requested products/quantities/units, reported contact, channel, uncertainties, commercial status, next action, and optional draft. Exact supporting quotations, supplied SKUs, stated contact fields, intent/status consistency and no-price constraints are validated before changes commit. This is schema/evidence validation, not a guarantee of semantic correctness; humans review outbound prose.
-- Requests are not orders. A quote request does not record revenue, reserve stock, set a price, or promise fulfillment. Unknown quantities and units remain unknown.
-- Reported contact details are saved against the account with source message, simulated provenance and `verified=false`; they do not replace historical source records or establish real-world verification. All automatic draft recipients remain simulator addresses.
-- Messages share a stable conversation, have timestamps and explicit parent-message links, and retain applicable campaign membership. Inbound external IDs and content fingerprints prevent repeated processing. Reusing an ID for different content is rejected.
-- Receiving a reply cancels obsolete reminders and pending sends/preparations, invalidates unsent drafts and supersedes old pending tasks. Same-account jobs remain serialized. An older ordinary result cannot replace a newer reply; a late opt-out still suppresses outreach.
-- A subsequent inbound reply or portfolio reassessment cannot automatically remove a stop-contact or distributor-review restriction. Manual commercial outcomes also stop inappropriate work. Existing source-data holds remain enforced.
-- Every outbound response uses the same exact-version approval and atomic delivery transaction as initial outreach. Duplicate sends remain blocked. No real network email transport exists.
-- The `MessageProvider` contract covers approved delivery, ingestion and conversation retrieval. Message records carry account/campaign association, parent linkage and status. Only `SimulatedProvider` is implemented; Gmail, Microsoft Graph, OAuth, webhooks and production deployment are deferred.
-
-## Verification
-
-- **112 backend tests and 32 frontend tests passed.** Production build and TypeScript checks passed.
-- Coverage includes all requested response types, structured output rejection before mutation, exact fresh approvals, thread linkage, duplicate/conflicting inbound IDs, contact persistence, distributor restriction persistence, stale-result races, opt-out suppression, no real delivery, and workflow → reset → workflow replay.
-- Real AI passed quote/reorder, training, changed purchasing contact, distributor purchasing, not interested, and opt-out. Reorder was repeated after reset. The browser also completed a training conversation using the actual background worker.
-- **9 real reply analyses** plus **3 automatic briefing calls** were recorded for this acceptance run: **12 model calls**, estimated **$0.103488** from saved provider usage and the application's existing pricing table. This is an estimate, not an invoice. No research tools were required.
-- The initial quote test expected the exact intent `reorder`; the model correctly returned `pricing` with `reorder_interest` and 20 packs. The test expectation was widened to accept that valid distinction. No keyword classification was added.
-- Browser testing caught and fixed rendering of older structured channel evidence and a response link that opened an unwanted account overlay. Regression tests cover both. Final checks have no outstanding failures.
-- Acceptance details, model output, usage and preservation audit are saved in ignored local `runtime/demo/validation/`. Rehearsal database snapshots remain under `runtime/demo/history/`.
-
-## Files changed for this milestone
-
-- `src/clearline/conversations.py`: conversation schema, migration, deduplicated ingestion, validated atomic reply effects, reported account context and commercial tasks.
-- `src/clearline/transport.py`: provider contract and simulator implementation.
-- `src/clearline/reply_agent.py`: bounded genuine AI interpretation and output validation.
-- `src/clearline/store.py`, `worker.py`, `reporting.py`, `workbench.py`, `api.py`: integrate conversation persistence, approvals, restrictions, worker execution, prepared groups and local API endpoints.
-- `src/clearline/demo.py`, `scripts/reset_demo.py`: isolated baseline and simple reset entry point; Lone Tree preparation.
-- `frontend/src/components/conversation.tsx`, `sales-surface.tsx`, `detail-views.tsx`, `frontend/src/lib/types.ts`, `frontend/src/app/globals.css`: compact conversation panel, fictional-reply control, current next-step text and assessment compatibility.
-- `tests/test_conversations.py`, reply fixtures/regressions, and `frontend/tests/conversation.test.tsx`: automated acceptance and UI regression coverage. Existing reset tests remain passing.
-- This guide, `docs/demo-readiness.md`, README and `docs/notion-update-pending.md`: current usage, evidence and limitations.
-
-## Remaining limitations
-
-The app and local worker must be running, with configured OpenAI API access, for new replies to be interpreted. Failed calls remain visible and retryable. No real inbox, live contact verification, distributor-record access, automatic quote/pricing engine, booked sale or verified incremental revenue is demonstrated. Channel/source questions still need genuine information from the relevant team. Opt-ins are not automatically inferred from later messages.
-
-Notion could not be updated: its fetch connector again returned `Unknown tool (notion.fetch)`. The intended update is preserved in `docs/notion-update-pending.md`; reconnecting Notion is the only outstanding external step. No push or deployment was performed.
+The initial snapshot and session live in the ignored `runtime/phase12-acceptance/conversation-demo/` directory. The launcher checks the registered paths and the selected checkpoint checksum. A fresh setup also needs an existing human-approved outbound checkpoint before registering its budget once with `scripts/conversation_demo.py budget-init`. This Mac is already registered. Both the historical acceptance ledger and the separate interactive ledger stay in that directory across resets. Use `scripts/conversation_demo.py budget-status` with the project Python for the current balance.

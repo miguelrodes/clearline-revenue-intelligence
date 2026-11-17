@@ -24,6 +24,9 @@
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.sr-only:focus-within{position:static;width:auto;height:auto;clip:auto;white-space:normal}.signal-summary{padding:18px 0}.review-content>.panel{margin-top:24px}
 
 .conversation-message{padding:18px 0;border-bottom:1px solid var(--border,#e5e9ed)}
+.conversation-message-subject{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:.25rem 1rem}
+.conversation-message-subject b{min-width:0;overflow-wrap:anywhere}
+.conversation-message-subject button{white-space:nowrap}
 .conversation-message h3{font-size:15px;margin:0 0 10px}.reply-decision{margin-top:16px;padding:16px;background:#EDF5FE;border-radius:8px}.reply-decision h4{font-size:14px;margin:0 0 8px}
 
 /* Keep action links visually light so they read as controls, not nested cards. */
@@ -155,6 +158,8 @@ thead,.work-section-title{background:#F7F9FC}th{color:#52657C}td{border-bottom-c
 .account-profile h3{font-size:16px;line-height:1.4;margin:0 0 8px}
 .account-profile .panel-head{padding:0;margin-bottom:14px;border:0;align-items:baseline}.account-profile .panel-head h2{margin:0}
 .account-profile .content-stack{padding:0}.account-profile p{font-size:14px;line-height:1.7;margin:8px 0 12px;max-width:1100px}
+.account-profile .next-action-draft>summary{font-size:14px;font-weight:600}
+.next-action-draft-meta{display:flex;align-items:center;gap:10px;margin:12px 0}
 .account-profile details>summary{cursor:pointer;color:var(--blue);font-size:13px;line-height:1.6}
 .account-profile .commercial-check{padding:16px 0;border-bottom:1px solid var(--border);gap:6px}.account-profile .commercial-check:first-child{padding-top:0}
 .account-profile .commercial-check>strong{font-size:15px}.account-profile .commercial-check p{margin:3px 0}.account-profile .commercial-check>small{color:var(--muted);margin:6px 0}
@@ -166,3 +171,128 @@ thead,.work-section-title{background:#F7F9FC}th{color:#52657C}td{border-bottom-c
 .workflow-status{font-size:11px;line-height:1.5;padding:3px 8px;font-weight:550;border:0;white-space:normal}
 .workflow-status.status-investigating{background:#FFF0DB;color:#854400}.workflow-status.status-verification{background:#FFF8CF;color:#705B00}.workflow-status.status-action{background:#E3EFFF;color:#1555AB}.workflow-status.status-complete{background:#E5F4EB;color:#23633B}.workflow-status.status-blocked{background:#FCE7E7;color:#9A3030}.workflow-status.status-neutral{background:#E8EDF3;color:#46576C}
 @media(max-width:760px){.account-profile .page-head{align-items:flex-start;gap:12px;flex-wrap:wrap}.account-profile .history-totals{grid-template-columns:repeat(2,minmax(0,1fr))}.account-profile h2{font-size:20px}.account-profile .history-block .inline-between{gap:12px;flex-wrap:wrap}.account-profile .table-scroll{max-width:100%}}
+.practical-entry{display:grid;gap:10px;padding:10px 0;min-width:0}.practical-entry label:not(.contact-clearance-confirm){display:grid;gap:4px}.practical-entry input:not([type=checkbox]),.practical-entry textarea,.practical-entry select{width:100%;max-width:58rem}.practical-entry>.action-link{justify-self:start}.commercial-check:target{scroll-margin-top:5rem}.commercial-check>h3{font-size:1rem}.commercial-check .practical-entry details>summary{cursor:pointer;color:var(--blue)}
+
+/* A disclosure and its checks belong to one customer. */
+.check-account-list { margin-top: 12px; }
+.check-account { padding: 18px 0; border-bottom: 1px solid var(--border); }
+.check-account:last-child { border-bottom: 0; }
+.check-account .review-account-name, .message-selection .review-account-name {
+  margin: 0 0 4px; color: var(--ink); font-size: 17px; line-height: 1.4; font-weight: 600;
+}
+.review-account-name a:hover { color: var(--blue); text-decoration: underline; }
+.check-account > p { font-size: 14px; margin: 2px 0; line-height: 1.5; }
+.review-organization { color: var(--muted); }
+.check-activity { display: block; color: var(--ink); margin: 4px 0; }
+.check-disclosure, .practical-disclosure, button.practical-secondary {
+  display: inline-flex; align-items: center; gap: 4px; width: fit-content; min-height: 30px;
+  padding: 4px 0; border: 0; background: transparent; box-shadow: none; text-align: left;
+  font-size: 13px; line-height: 1.45; cursor: pointer;
+}
+.check-disclosure { color: var(--blue); font-weight: 550; margin-top: 4px; }
+.check-disclosure[aria-expanded=true] svg { transform: rotate(90deg); }
+.check-disclosure:hover, .practical-disclosure:hover, .practical-secondary:hover, .practical-support > summary:hover {
+  background: transparent; text-decoration: underline; text-underline-offset: 3px;
+}
+.check-account-content { border-left: 2px solid var(--border); padding: 0 0 0 clamp(10px, 2vw, 22px); margin: 6px 0 4px 7px; }
+.check-account-content[hidden], .practical-entry[hidden] { display: none; }
+.check-account-content .commercial-check { padding: 12px 0; }
+.check-account-content .commercial-check + .commercial-check { border-top: 1px solid var(--border); }
+.account-profile #next-action .panel-head { margin-bottom: 6px; }
+.account-profile .practical-next { display: grid; justify-items: start; gap: 4px; }
+.account-profile .practical-next h3, .account-profile .practical-next p { margin: 0; }
+.practical-reference { color: var(--muted); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
+.practical-reference:hover { color: var(--blue); }
+.practical-secondary, details.practical-support > summary, .account-profile details.practical-support > summary,
+.commercial-check .practical-entry details > summary, .account-profile .inquiry-history > summary { color: var(--muted); }
+.practical-secondary:hover, .practical-support > summary:hover { color: var(--ink); }
+.practical-current { font-weight: 600; }
+.practical-entry { max-width: 54rem; }
+.inquiry-history { font-size: 13px; }
+.practical-disclosure:focus-visible, .check-disclosure:focus-visible, .practical-reference:focus-visible,
+.practical-secondary:focus-visible, .practical-support > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+details.practical-support > summary { cursor: pointer; font-size: 13px; line-height: 1.6; width: fit-content; }
+.check-account .check-activity, .brief-member .check-activity { font-weight: 550; }
+
+.overview-area > h2, h1.section-page-title { font-size: clamp(25px, 2.3vw, 34px); }
+.overview-area > h2 { line-height: 1.18; letter-spacing: -.035em; margin: 0 0 20px; }
+.overview-area + .overview-area { border-top: 1px solid var(--border); padding-top: 28px; }
+.overview-area .brief-heading h3, .overview-area .brief-actions-header h3,
+.screening .brief-heading h2, .screening .brief-actions-header h2, .prospect-candidates > .page-heading h2 {
+  font-size: clamp(20px, 1.65vw, 25px); line-height: 1.25; letter-spacing: -.025em; font-weight: 650;
+}
+.screening > .page-heading:first-child { margin-block-end: clamp(22px, 2vw, 30px); }
+
+.account-contact-actions{margin:0 0 20px}
+.contact-action-row{display:flex;align-items:center;flex-wrap:wrap;column-gap:28px;row-gap:4px}
+.contact-action-row>.action-link{min-height:32px}
+.contact-action-row>.contact-stop{color:#9a3030}
+.contact-action-form{display:grid;gap:12px;max-width:36rem;margin:10px 0 0}
+.contact-action-form label{display:grid;gap:4px}
+.contact-action-form :is(input,textarea,select){max-width:100%}
+.account-contact-actions .notice{margin:10px 0}
+.account-contact-actions .notice small{display:block}
+
+.overview-scope { display:flex; justify-content:flex-end; margin-bottom:12px; }
+.overview-scope label, .pipeline-filters label, .prospect-run-form label { color:var(--muted); font-size:13px; font-weight:550; }
+.overview-scope select { margin-left:8px; background:transparent; border:0; color:var(--blue); cursor:pointer; }
+.prospect-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(135px,1fr)); margin:18px 0 26px; gap:10px 18px; }
+.prospect-metric { position:relative; min-width:0; }
+.prospect-metric .kpi-tooltip { top:100%; left:50%; transform:translateX(-50%); max-width:min(17rem, calc(100% + 1.5rem)); }
+.prospect-metric .kpi-tooltip:not([hidden]) { display:block; }
+.prospect-metrics a { display:grid; height:100%; align-content:start; gap:5px; padding:9px 2px; color:var(--muted); border-bottom:1px solid var(--border); }
+.prospect-metrics a:hover span, .prospect-metrics a:focus-visible span { color:var(--blue); text-decoration:underline; }
+.prospect-metrics strong { color:var(--ink); font-size:22px; line-height:1.15; }
+.screening .pipeline-filters { justify-content:flex-start; align-items:end; gap:12px 18px; }
+.pipeline-filters label, .prospect-run-form label { display:grid; gap:4px; }
+.screening .pipeline-filters input { width:100%; min-width:0; max-width:14rem; }
+.pipeline-filters label:first-child { flex:1 1 170px; }
+.pipeline-filters input[type="number"], .pipeline-filters input[maxlength="2"] { max-width:7rem; }
+.prospect-candidates, .research-selection, .prospect-discovery { margin:22px 0; }
+.prospect-candidates, .prospect-candidates .table-scroll, .prospect-candidates .empty { scroll-margin-top:76px; }
+.prospect-candidates details>summary, .screening-detail details>summary { color:var(--blue); cursor:pointer; }
+.prospect-candidates th:first-child { width:54px; }.prospect-candidates td:nth-child(2){min-width:11rem}
+.prospect-run-form { display:grid; gap:12px; max-width:54rem; margin:12px 0; }
+.prospect-run-form label>span { display:contents; font-weight:400; }
+.prospect-run-form input:not([type=checkbox]), .prospect-run-form textarea, .prospect-run-form select { width:100%; }
+.prospect-run-form .screening-check { display:flex; gap:8px; align-items:baseline; }
+.prospect-discovery-fields { display:grid; grid-template-columns:minmax(8rem,1fr) 2fr minmax(9rem,1fr); gap:14px; }
+.run-estimate { border-left:2px solid var(--blue); padding:2px 12px; line-height:1.6; }
+.run-estimate p, .prospect-run-form p { margin:2px 0; }
+.screening .research-selection h3 { margin-bottom:6px; }
+.action-center-panel + .overview-area { margin-top:28px; }
+@media(max-width:760px){.prospect-discovery-fields { grid-template-columns:1fr; }.prospect-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }.screening .pipeline-filters label{max-width:100%;}}
+
+/* Keep the screening summary short enough to compare candidates on a laptop. */
+.screening .screening-brief { margin-bottom:12px; }
+.screening .screening-brief .brief-heading { margin:0 0 5px; }
+.screening .screening-brief .brief-summary { padding-bottom:0; margin:0; font-size:14px; line-height:1.4; }
+.screening-brief .brief-summary li { margin-bottom:2px; }
+.screening-brief .prospect-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,105px),1fr)); gap:6px 14px; margin:10px 0 4px; }
+.screening-brief .prospect-metric a { display:flex; flex-direction:column; align-items:center; text-align:center; gap:3px; padding:4px 0; font-size:13px; }
+.screening-brief .prospect-metric strong { order:-1; font-size:21px; font-variant-numeric:tabular-nums; }
+.screening-brief .priority-note { color:var(--muted); font-size:13px; margin:6px 0; }
+.screening .prospect-candidates { margin:14px 0; }
+.screening .prospect-candidates .page-heading { margin-bottom:8px; }
+.screening .pipeline-filters { display:grid; grid-template-columns:1.25fr 1.2fr 1.15fr .5fr 1fr 1fr .65fr; gap:6px 10px; padding:10px 12px; }
+.screening .pipeline-filters label, .screening .pipeline-filters select { min-width:0; width:100%; }
+.screening .pipeline-filters input, .screening .pipeline-filters select { height:32px; padding:3px 6px; }
+.screening .prospect-candidates .table-scroll { max-height:clamp(320px,51vh,560px); overflow:auto; }
+.screening .prospect-candidates th { position:sticky; top:0; background:var(--surface,#fff); z-index:1; }
+.screening .prospect-candidates :is(th,td) { padding:8px 10px; }
+.screening .prospect-candidates th:nth-child(1){width:60px}
+.screening .prospect-candidates th:nth-child(2){width:23%}
+.screening .prospect-candidates th:nth-child(3){width:27%}
+.screening .prospect-candidates th:nth-child(4){width:18%}
+.screening .prospect-candidates th:nth-child(5){width:auto}
+.screening-actions .brief-action-main { padding:8px 0; min-height:0; }
+.screening-actions .brief-action-body :is(h3,p,.brief-financial) { margin:2px 0; }
+.screening-actions .brief-actions-header { margin:12px 0 4px; }
+@media(max-width:1050px){.screening .pipeline-filters{grid-template-columns:repeat(4,minmax(0,1fr));}}
+@media(max-width:650px){.screening .pipeline-filters{grid-template-columns:repeat(2,minmax(0,1fr));}.screening-brief .prospect-metrics{gap:3px 12px;}}
+
+.operational-brief > .section-page-title { margin-bottom: 20px; }
+.brief-controls { margin-inline-start: auto; max-width: 100%; }
+.brief-controls select { field-sizing: content; text-align: right; text-align-last: right; border: 0; background: transparent; box-shadow: none; color: var(--blue); cursor: pointer; }
+.brief-controls select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }

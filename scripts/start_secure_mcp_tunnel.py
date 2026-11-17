@@ -5,16 +5,41 @@ import asyncio
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 
-from clearline.config import ROOT
+from dotenv import dotenv_values
+
+from clearline.config import ROOT, Settings
 from clearline.mcp_client import configuration, invoke
 
-LOCAL_URL = "http://127.0.0.1:8000/mcp"
+LOCAL_URL = "http://127.0.0.1:8003/mcp"
+REHEARSAL_ENV_FILE = Path.home() / "Code/clearline-revenue-intelligence/.env"
 
 
-def launch_configuration(mode, environ, url, token):
+def rehearsal_mcp_token(environ):
+    """Read the already-configured token for the rehearsal server without printing it."""
+    env_file = Path(environ.get("CLEARLINE_REHEARSAL_ENV_FILE", REHEARSAL_ENV_FILE))
+    token = str(dotenv_values(env_file).get("CLEARLINE_MCP_TOKEN") or "").strip()
+    if len(token) < 32:
+        raise ValueError("The isolated rehearsal MCP token is not configured in its local environment file.")
+    return token
+
+
+def tunnel_client_path(environ):
+    """Find the installed official client while allowing a local path override."""
+    configured = environ.get("CLEARLINE_TUNNEL_CLIENT", "").strip()
+    candidates = [Path(configured)] if configured else []
+    candidates.extend((ROOT / "runtime/bin/tunnel-client", Path.home() / "Code/clearline-revenue-intelligence/runtime/bin/tunnel-client"))
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return resolved
+    raise ValueError("The installed tunnel-client was not found. Set CLEARLINE_TUNNEL_CLIENT to its local path.")
+
+
+def launch_configuration(mode, environ, url, token, client_path=None):
     """Do not inherit alternate endpoints, raw logging, profiles or API-key fallback."""
     if mode not in ("doctor", "run"):
         raise ValueError("Choose doctor or run")
@@ -29,7 +54,8 @@ def launch_configuration(mode, environ, url, token):
     env = {k: environ[k] for k in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR") if k in environ}
     env.update(CONTROL_PLANE_TUNNEL_ID=tunnel_id, CONTROL_PLANE_API_KEY=key,
                CLEARLINE_MCP_AUTHORIZATION="Bearer " + token)
-    args = [str(ROOT / "runtime/bin/tunnel-client"), mode,
+    executable = Path(client_path) if client_path else tunnel_client_path(environ)
+    args = [str(executable), mode,
             "--control-plane.base-url", "https://api.openai.com",
             "--control-plane.api-key", "env:CONTROL_PLANE_API_KEY",
             "--mcp.server-url", LOCAL_URL,
@@ -42,24 +68,41 @@ def launch_configuration(mode, environ, url, token):
     return args, env
 
 
+def redact_output(output, env, token):
+    """Keep credentials out of diagnostic and long-running client output."""
+    for secret in (env["CONTROL_PLANE_API_KEY"], env["CONTROL_PLANE_TUNNEL_ID"], token,
+                   env["CLEARLINE_MCP_AUTHORIZATION"]):
+        output = output.replace(secret, "[REDACTED]")
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("doctor", "run"), default="doctor", nargs="?")
     args = parser.parse_args()
-    _, url, token = configuration()
+    Settings.load()
+    token = rehearsal_mcp_token(os.environ)
+    os.environ["CLEARLINE_MCP_TOKEN"] = token
+    os.environ["CLEARLINE_MCP_URL"] = LOCAL_URL
+    _, url, _ = configuration()
     command, env = launch_configuration(args.mode, os.environ, url, token)
-    if not Path(command[0]).is_file():
-        raise ValueError("Install the official tunnel-client in runtime/bin first; see docs/mcp-integration.md")
     status = asyncio.run(invoke("get_agent_status", {}))
     if not status["health"].get("disposable_demo"):
         raise ValueError("The running backend must use its registered disposable demo session")
     print("Private tunnel to the authenticated demo MCP endpoint. No public listener. Ctrl+C stops it.", flush=True)
     if args.mode == "doctor":
         result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=60)
-        output = (result.stdout + result.stderr).replace(env["CONTROL_PLANE_API_KEY"], "[REDACTED]").replace(token, "[REDACTED]")
-        print(output)
+        print(redact_output(result.stdout + result.stderr, env, token))
         return result.returncode
-    os.execve(command[0], command, env)
+    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, bufsize=1)
+    try:
+        for line in process.stdout:
+            print(redact_output(line, env, token), end="", flush=True)
+        return process.wait()
+    except KeyboardInterrupt:
+        process.send_signal(signal.SIGINT)
+        return process.wait()
 
 
 if __name__ == "__main__":

@@ -22,6 +22,36 @@ def page(rows,offset=0,limit=25):
     return {'items':rows[offset:offset+limit],'total':len(rows),'offset':offset,'limit':limit,'next_offset':offset+limit if offset+limit<len(rows) else None}
 
 class BusinessAccess:
+    def purchasing_contact_checks(self,oid):
+        from .task_purpose import task_purpose
+        rows=self.store.rows("SELECT id,title,reason FROM investigation_tasks WHERE opportunity_id=? AND status='pending' ORDER BY id",(oid,))
+        return [row for row in rows if task_purpose(row)['contact_resolvable']
+                and not ('crm hypothesis' in row['title'].casefold() and row['title'].casefold().startswith('review '))]
+
+    def verify_mcp_contact(self,oid,recipient,role,route,evidence,authorized,task_id=None):
+        if not authorized:
+            return self.authorize_contact(oid,recipient,role,route,evidence,False)
+        # A replay of the exact resolved check must not consume a second task.
+        if self.store.rows("""SELECT 1 FROM contact_clearance_notes n
+            JOIN contact_authorizations a USING(opportunity_id)
+            JOIN investigation_tasks t ON t.id=n.task_id AND t.opportunity_id=n.opportunity_id
+            WHERE n.opportunity_id=? AND n.status='verified' AND t.status='resolved'
+            AND (?='' OR t.id=?) AND a.authorized=1 AND a.recipient=? AND a.role=?
+            AND a.route=? AND a.evidence=?""",
+            (oid,task_id or '',task_id,recipient.strip(),role.strip(),route,evidence.strip())):
+            return dict(status='verified',task_status='resolved',job_id=None,requires_reassessment=False,authorized=True)
+        checks=self.purchasing_contact_checks(oid)
+        if task_id and task_id not in {c['id'] for c in checks}:
+            raise ValueError('Select a pending purchasing contact check on this account.')
+        if not task_id and len(checks)>1:
+            raise ValueError('Use get_account to select one pending_contact_checks ID and pass task_id.')
+        notes=self.store.rows('SELECT recipient,contact_name,phone,route,distributor FROM contact_clearance_notes WHERE opportunity_id=?',(oid,))
+        saved=notes[0] if notes and (notes[0]['recipient'] or '').casefold()==recipient.strip().casefold() else {}
+        return self.save_contact_clearance(oid,task_id=task_id or (checks[0]['id'] if checks else None),
+            recipient=recipient,role=role,route=route,verification_evidence=evidence,verified=True,
+            contact_name=saved.get('contact_name'),phone=saved.get('phone'),
+            distributor=saved.get('distributor') if route==saved.get('route') else '')
+
     def commercial_signals(self,oid=None):
         if oid:self.account(oid)
         rows=self.store.rows('SELECT * FROM commercial_signals WHERE active=1'+(' AND opportunity_id=?' if oid else ''),(oid,) if oid else ())
@@ -125,20 +155,32 @@ class BusinessAccess:
         return {'status':status,'task_status':task_status,'job_id':job_id,'requires_reassessment':queue_reassessment,'authorized':authorized_now}
 
     def resolve_investigation(self,task_id,resolution):
-        from .store import utcnow
-        if not resolution.strip():raise ValueError('Explain the verified finding; completion alone is not evidence')
-        rows=self.store.rows("SELECT * FROM investigation_tasks WHERE id=? AND status='pending'",(task_id,))
-        if not rows:raise ValueError('Pending investigation task not found')
-        task=rows[0]
-        from .task_purpose import task_purpose
-        if task_purpose(task)['contact_check']:
-            auth=self.store.rows('SELECT 1 FROM contact_authorizations WHERE opportunity_id=? AND authorized=1',(task['opportunity_id'],))
-            if not auth:raise ValueError('Contact checks require a verified purchasing recipient and route. Use Contact Clearance; a note alone cannot clear this blocker.')
+        from .commercial import verified_task_finding
+        from .practical_actions import practical_actions
+        from .internal_inquiries import validate_record_coverage
         with self.store.connect(write=True) as con:
-            con.execute('INSERT INTO investigation_resolutions VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET resolution=excluded.resolution,updated_at=excluded.updated_at',(task_id,task['opportunity_id'],resolution,utcnow()))
-            con.execute("UPDATE investigation_tasks SET status='resolved' WHERE id=?",(task_id,))
-            self.store.event('investigation_resolved',{'task_id':task_id,'resolution':resolution},opportunity_id=task['opportunity_id'],con=con)
-        return {'job_id':self.store.queue_analysis(task['opportunity_id'],investigation=True),'requires_reassessment':True}
+            from .task_purpose import agent_managed_task
+            from .commercial import workflow_control_task
+            from .evidence import current_assessment
+            from .store import STOPPED_STATUSES
+            check=con.execute("SELECT t.*,o.status AS account_status FROM investigation_tasks t JOIN opportunities o ON t.opportunity_id=o.id WHERE t.id=? AND t.status='pending'",(task_id,)).fetchone()
+            if not check:raise ValueError('Pending investigation task not found')
+            if check['account_status'] in STOPPED_STATUSES|{'no_action','monitor','defer','approved','awaiting_response','awaiting_approval'} or agent_managed_task(check) or workflow_control_task(check):
+                raise ValueError('There is no actionable human finding to record here')
+            review=con.execute("SELECT details FROM events WHERE opportunity_id=? AND kind='agent_decision' ORDER BY id DESC LIMIT 1",(check['opportunity_id'],)).fetchone()
+            if review:
+                a=json.loads(review['details'])
+                if a.get('engine_version') and (a.get('decision') in ('no_action','monitor','defer') or a.get('review_failed') or not current_assessment(con,check['opportunity_id'],a)):
+                    raise ValueError('The current assessment no longer supports this check. Wait for Clearline to update the account.')
+            actions=practical_actions(self.store,self.settings,check['opportunity_id'])
+            for group in actions:
+                for member in group['tasks']:
+                    if member['id']==task_id:
+                        validate_record_coverage(group,member,resolution)
+            task=verified_task_finding(self.store,con,task_id,resolution)
+            opp=con.execute('SELECT * FROM opportunities WHERE id=?',(task['opportunity_id'],)).fetchone()
+            if not opp or not opp['active'] or opp['workflow']!='recovery':raise ValueError('Active recovery account required')
+            return {'job_id':self.store._enqueue_analysis(con,opp,investigation=True),'requires_reassessment':True}
 
     def query_accounts(self,q='',workflow='recovery',signal=None,queue=None,status=None,actionable_only=False,uncontacted=False,min_decline_cents=None,sort='decline',offset=0,limit=25):
         from .store import STOPPED_STATUSES
@@ -159,7 +201,7 @@ class BusinessAccess:
 
     def account_view(self,oid,section='summary',offset=0,limit=25):
         d=self.detail(oid)
-        if section=='summary':return {k:v for k,v in d.items() if k not in ('drafts','events','jobs','outbox','outcomes','trends','evidence')}|{'assessment':d['assessment'],'limits':d['evidence'].get('limits',[])}
+        if section=='summary':return {k:v for k,v in d.items() if k not in ('drafts','events','jobs','outbox','outcomes','trends','evidence')}|{'assessment':d['assessment'],'limits':d['evidence'].get('limits',[]),'pending_contact_checks':self.purchasing_contact_checks(oid)}
         if section=='evidence':return {'account_id':oid,'evidence_hash':d['evidence_hash'],'evidence':d['evidence'],'definitions':DEFINITIONS}
         if section=='history':return {'account_id':oid,'trends':d['trends'],'events':page(d['events'],offset,limit)}
         if section=='conversation':return self.conversation(oid)
@@ -180,13 +222,19 @@ class BusinessAccess:
         rows=rows.sort_values(['order_date','source_row'],ascending=[False,True]).drop(columns=['date'])
         return {'account_id':oid,'note':'Exact assigned source rows; open or future-dated records are shown as evidence and are not booked revenue.',**page(rows.to_dict('records'),offset,limit)}
 
+    def daily_priorities(self):
+        from .mcp_priorities import current_work
+        summary,_=current_work(self)
+        return summary
+
     def action_groups(self,group_id=None,offset=0,limit=25):
-        data=self.work()
+        from .mcp_priorities import current_work
+        summary,data=current_work(self)
         if group_id:
             g=next((g for g in data['groups'] if g['id']==group_id),None)
             if not g:raise ValueError('Action group not found')
             return {k:v for k,v in g.items() if k!='members'}|{'members':page(g['members'],offset,limit)}
-        return {k:v for k,v in data.items() if k!='groups'}|{'groups':page([{k:v for k,v in g.items() if k!='members'}|{'member_count':len(g['members'])} for g in data['groups']],offset,limit)}
+        return summary|{k:v for k,v in data.items() if k!='groups'}|{'groups':page([{k:v for k,v in g.items() if k!='members'}|{'member_count':len(g['members'])} for g in data['groups']],offset,limit)}
 
     def signal_page(self,key,offset=0,limit=25):
         data=self.signal_view(key)
@@ -223,7 +271,9 @@ class BusinessAccess:
         for did in draft_ids:
             d=self.draft(did)
             if d['status']!='awaiting_approval' or not valid_draft(self.store,d):raise ValueError('Draft is no longer eligible for review: '+did)
-            snapshots.append({k:d[k] for k in ('id','opportunity_id','version','recipient','subject','body')}|{'snapshot_hash':self.store.draft_hash(d)})
+            intended=json.loads(d['analysis']).get('recipient')
+            snapshots.append({k:d[k] for k in ('id','opportunity_id','version','recipient','subject','body')}|{'snapshot_hash':self.store.draft_hash(d),
+                'intended_recipient':intended if intended!=d['recipient'] else None,'delivery_destination':d['recipient']})
         rid=uuid4().hex;expiry=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
         with self.store.connect(write=True) as con:
             con.execute('INSERT INTO approval_reviews VALUES(?,?,?,NULL,NULL)',(rid,json.dumps(snapshots),expiry))
@@ -272,6 +322,8 @@ class BusinessAccess:
     def regenerate_draft(self,did,version,request_id):
         from .reporting import valid_draft
         d=self.draft(did)
+        from .prospect_access import web_candidate
+        if web_candidate(self.account(d['opportunity_id'])):raise ValueError('Preview and confirm targeted research in Prospect Screening.')
         if version!=d['version'] or d['status']!='awaiting_approval' or not valid_draft(self.store,d):raise ValueError('Only a current unapproved draft can be regenerated')
         analysis=json.loads(d['analysis']);payload={'evidence_hash':d['evidence_hash'],'portfolio':True,'allow_simulation':True,'regenerate_id':did,'regenerate_hash':self.store.draft_hash(d)}
         if analysis.get('reply_to'):payload['outcome_id']=analysis['reply_to'];kind='reply'

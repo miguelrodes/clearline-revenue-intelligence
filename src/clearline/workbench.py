@@ -16,8 +16,7 @@ def ready_messages(store):
     for j in store.rows("SELECT id,opportunity_id,status,error FROM jobs WHERE kind='revise_draft' ORDER BY created_at,rowid"):
         revisions[j['opportunity_id']]={k:j[k] for k in ('id','status','error')}
     for d in store.rows("SELECT d.* FROM drafts d WHERE d.status='awaiting_approval' AND d.version=(SELECT MAX(x.version) FROM drafts x WHERE x.opportunity_id=d.opportunity_id)"):
-        from .draft_revision import manual_reviewable
-        if not valid_draft(store,d) and not manual_reviewable(store,d):continue
+        if not valid_draft(store,d):continue
         o=store.opportunity(d['opportunity_id'])
         if o['status']!='awaiting_approval':continue
         # A pending delivery or a delivered copy cannot become a second action.
@@ -36,7 +35,13 @@ def ready_messages(store):
     return rows
 
 
-def work_groups(store,now=None,workflow=None):
+def human_check(title, status):
+    from .commercial import workflow_control_task
+    dormant = STOPPED_STATUSES | {'monitor', 'defer', 'no_action', 'approved', 'awaiting_response', 'awaiting_approval'}
+    return status not in dormant and not workflow_control_task({'title': title})
+
+
+def work_groups(store,now=None,workflow=None,*,include_automated_checks=False):
     now=now or utcnow();groups=[];messages=[m for m in ready_messages(store) if workflow is None or m['workflow']==workflow]
     accounts=opportunities(store);real=opportunities(store,'prospecting') if workflow is None else [];all_accounts={a['id']:a for a in accounts+real}
     def add(key,title,kind,members,why,button,rank,status='ready',amount=True,**extra):
@@ -79,25 +84,49 @@ def work_groups(store,now=None,workflow=None):
     unassessed=[a for a in operational_queue(store,'unassessed',accounts) if a['signals']]
     add('investigate','Review customers awaiting investigation','accounts',unassessed,'The agents still need to review these purchasing changes.','Review customers',3,status='needs_information')
     add('real_questions','Review real-prospect questions','accounts',[a for a in real if a['status']=='agent_held'],'The research or response review found a question that needs your decision.','Review prospect',2,status='needs_information',amount=False)
-    tasks=store.rows("SELECT t.*,o.name,o.workflow FROM commercial_tasks t JOIN opportunities o ON o.id=t.opportunity_id WHERE t.status='pending' ORDER BY t.created_at")
+    tasks=store.rows("SELECT t.*,o.name,o.workflow FROM commercial_tasks t JOIN opportunities o ON o.id=t.opportunity_id WHERE t.status='pending' AND o.status NOT IN ('outreach_paused','opted_out','lost','no_action','monitor','defer','deferred') ORDER BY t.created_at")
     members=[{'id':t['opportunity_id'],'name':t['name'],'workflow':t['workflow'],'recommended_action':t['title'],'status':'needs_information','task_id':t['id']} for t in tasks if workflow is None or t['workflow']==workflow]
     add('conversation_tasks','Resolve customer requests','accounts',members,'These customers have replied. Review the suggested next step before continuing outreach.','Review customer requests',0,status='needs_information',amount=False)
     verification=store.rows("SELECT t.*,o.name,o.workflow,o.account_key,o.decline_cents FROM investigation_tasks t JOIN opportunities o ON o.id=t.opportunity_id WHERE t.status='pending' AND o.active=1 ORDER BY t.blocking DESC,o.decline_cents DESC")
     # Presentation groups use only existing pending work. Dormant prerequisites
     # stay on the account, but no-action/monitoring decisions are not a daily to-do.
     import re
+    communication_states={}
+    if not include_automated_checks and verification:
+        from .internal_inquiries import task_communication_work
+        with store.connect() as con:
+            communication_states=task_communication_work(con)
     buckets={}
     for t in verification:
         if workflow is not None and t['workflow']!=workflow:continue
         account=all_accounts.get(t['opportunity_id'],{})
+        if not include_automated_checks and not human_check(t['title'], account.get('status')):continue
         current=bool(account.get('engine_version'))
         if current and account.get('status') in {'no_action','monitor','defer'}:continue
         title=t['title'].lower()
         key=('orders' if re.search(r'\b(order\w*|invoice\w*|fulfil\w*|ship\w*|credit\w*|refund\w*|cancel\w*)\b',title) else
              'contacts' if re.search(r'contact|recipient|authoriz|identity|match|mapping|route|relationship',title) else
              'needs' if re.search(r'train|product|need|interest|procure|budget',title) else 'records') if current else 'legacy'
-        buckets.setdefault(key,[]).append({'id':t['opportunity_id'],'account_key':t['account_key'],'name':t['name'],'workflow':t['workflow'],'decline_cents':t['decline_cents'],
-              'recommended_action':t['title']+' — '+t['reason'],'owner':t['owner'],'task_id':t['id'],'blocking':bool(t['blocking'])})
+        if current and not include_automated_checks:
+            if key=='records' and 'operational review' in title and re.search(r'\bso-\d+\b',title):
+                key='orders'
+            elif key=='records' and re.search(r'\b(?:funding|grant)\b',title):
+                key='needs'
+        member = {'id':t['opportunity_id'],'account_key':t['account_key'],'name':t['name'],'workflow':t['workflow'],
+                  'decline_cents':t['decline_cents'],'recommended_action':t['title']+' — '+t['reason'],
+                  'owner':t['owner'],'task_id':t['id'],'blocking':bool(t['blocking'])}
+        communication = communication_states.get(t['id'])
+        if communication:
+            member.update(communication, href='/accounts/'+member['id']+'#commercial-work', verification_category=key)
+            key = 'waiting' if communication['inquiry_state']=='status_requested' else 'review'
+        buckets.setdefault(key, []).append(member)
+
+    add('internal:review','Review internal inquiries and findings','accounts',buckets.pop('review',[]),
+        'An internal inquiry is ready for approval or a reply has arrived. Open the customer check to review it.',
+        'Review internal work',0,status='needs_review',amount=False)
+    add('internal:waiting','Awaiting internal findings','accounts',buckets.pop('waiting',[]),
+        'The internal inquiry was sent. The responsible team still needs to report its findings.',
+        'View sent inquiries',5,status='waiting',amount=False)
     definitions={
         'orders':('Check open orders and credits','The agents identified specific order or credit records to check. Ask the named internal owner for the missing status or explanation, then record the finding on the customer.','Review order and credit checks',1),
         'contacts':('Confirm purchasing contacts and buying routes','The agents found a potential commercial reason to act, but the contact or relationship is unverified. Confirm the existing purchasing contact and permitted route before outreach.','Review contact checks',2),

@@ -40,6 +40,8 @@ def outbound_record(con,outbox,draft,backfill=False):
 
 def migrate(con):
     con.executescript(SCHEMA)
+    from .outreach_controls import SCHEMA as restriction_schema
+    con.executescript(restriction_schema)
     for row in con.execute('SELECT b.* FROM outbox b WHERE NOT EXISTS(SELECT 1 FROM messages m WHERE m.outbox_id=b.id)').fetchall():
         d=con.execute('SELECT * FROM drafts WHERE id=?',(row['draft_id'],)).fetchone()
         outbound_record(con,row,d,backfill=True)
@@ -51,9 +53,14 @@ def migrate(con):
                     ('inbound:'+row['id'],parent['conversation_id'],row['opportunity_id'],'simulated','legacy:'+row['id'],'inbound',parent['id'],None,row['id'],parent['recipient'],parent['sender'],'Re: '+parent['subject'],row['note'],'legacy_recorded',1,parent['campaign_ids'],row['created_at'],None))
 
 
-def policy(con,oid):
+def saved_policy(con,oid):
     row=con.execute('SELECT outreach_policy FROM customer_context WHERE opportunity_id=?',(oid,)).fetchone()
     return row['outreach_policy'] if row else 'normal'
+
+def policy(con,oid):
+    if con.execute("SELECT 1 FROM outreach_restrictions WHERE opportunity_id=? AND scope='account' AND released_at IS NULL",(oid,)).fetchone():
+        return 'stop'
+    return saved_policy(con,oid)
 
 
 def ingest_message(store,oid,parent_id,external_id,body,sender=None):
@@ -76,8 +83,9 @@ def ingest_message(store,oid,parent_id,external_id,body,sender=None):
         con.execute("INSERT INTO outcomes(id,opportunity_id,kind,note,provenance,created_at) VALUES(?,?,'reply',?,'manual_demo_input',?)",(outcome,oid,body,now))
         con.execute('INSERT INTO outcome_outreach VALUES(?,?)',(outcome,parent['outbox_id']))
         # Replies replace unanswered-message reminders and invalidate unsent proposals.
-        con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE opportunity_id=? AND kind IN ('followup','analyze','prepare','deliver') AND status IN ('queued','running','blocked_config')",(now,oid))
-        con.execute("UPDATE drafts SET status='cancelled' WHERE opportunity_id=? AND status IN ('awaiting_approval','approved')",(oid,))
+        from .outreach_controls import cancel_outreach,intended_recipient
+        cancel_outreach(con,oid,now,intended_recipient(con,parent_id) or None)
+        con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE opportunity_id=? AND kind IN ('analyze','prepare') AND status IN ('queued','running','blocked_config')",(now,oid))
         con.execute("UPDATE commercial_tasks SET status='superseded',updated_at=? WHERE opportunity_id=? AND status IN ('pending','awaiting_approval','approved')",(now,oid))
         if policy(con,oid)!='stop' and o['status'] not in STOPPED_STATUSES-{'replied'}:con.execute("UPDATE opportunities SET status='replied',updated_at=? WHERE id=?",(now,oid))
         con.execute("UPDATE conversations SET status='analyzing_reply',updated_at=? WHERE id=?",(now,parent['conversation_id']))
@@ -91,7 +99,10 @@ def ingest_message(store,oid,parent_id,external_id,body,sender=None):
 def conversation(store,oid):
     c=store.rows('SELECT * FROM conversations WHERE opportunity_id=?',(oid,))
     messages=store.rows('SELECT * FROM messages WHERE opportunity_id=? ORDER BY created_at,rowid',(oid,))
+    reviews={r['outbox_id']:r['note'] for r in store.rows("""SELECT json_extract(details,'$.outbox_id') outbox_id,
+        json_extract(details,'$.note') note FROM events WHERE opportunity_id=? AND kind='sent_message_reviewed'""",(oid,))}
     for m in messages:
+        m['sent_review']=reviews.get(m['outbox_id'])
         m['campaign_ids']=json.loads(m['campaign_ids'])
         interpretations=store.rows('SELECT body,created_at FROM reply_interpretations WHERE message_id=?',(m['id'],))
         m['interpretation']=json.loads(interpretations[0]['body']) if interpretations else None
@@ -101,7 +112,15 @@ def conversation(store,oid):
     ctx=context[0] if context else {'contact':None,'channel':None,'outreach_policy':'normal'}
     for key in ('contact','channel'):
         if isinstance(ctx[key],str):ctx[key]=json.loads(ctx[key])
-    return {'id':c[0]['id'] if c else None,'status':c[0]['status'] if c else 'not_started','provider':'simulated','messages':messages,'context':ctx,
+    from .outreach_controls import active
+    with store.connect() as con:
+        restrictions=active(con,oid)
+        auth=con.execute('SELECT recipient FROM contact_authorizations WHERE opportunity_id=? AND authorized=1',(oid,)).fetchone()
+    status=c[0]['status'] if c else 'not_started'
+    if any(r['kind']=='do_not_contact' and r['scope']=='account' for r in restrictions):status='opted_out'
+    elif any(r['kind']=='pause' for r in restrictions):status='outreach_paused'
+    return {'id':c[0]['id'] if c else None,'status':status,'provider':'simulated','messages':messages,'context':ctx,
+            'restrictions':restrictions,'authorized_recipient':auth[0] if auth else None,
             'tasks':store.rows('SELECT * FROM commercial_tasks WHERE opportunity_id=? ORDER BY created_at,rowid',(oid,))}
 
 
@@ -126,10 +145,28 @@ def save_reply(store,job,result):
         if d.engine_version==ENGINE_VERSION and d.context_hash!=context_hash(con,o['id']) and d.intent not in ('opt_out','not_interested'):
             con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE id=?",(utcnow(),job['id']))
             return
-        data=d.model_dump();now=utcnow();prior_policy=policy(con,o['id']);blocked=prior_policy=='stop' or o['status'] in STOPPED_STATUSES-{'replied'}
+        from .outreach_controls import intended_recipient, record, restriction
+        target=intended_recipient(con,m['reply_to'])
+        data=d.model_dump();now=utcnow();prior_policy=saved_policy(con,o['id'])
+        existing=restriction(con,o['id'],d.recipient or target)
+        blocked=bool(existing) or prior_policy=='stop' or o['status'] in STOPPED_STATUSES-{'replied'}
         state='awaiting_approval' if d.decision=='pursue' else 'agent_held'
         conversation_state=d.opportunity_status;outreach_policy=prior_policy
-        if d.intent=='opt_out':state='opted_out';outreach_policy='stop'
+        if d.intent=='opt_out':
+            scope=d.opt_out_scope
+            if d.opt_out_recipient:target=d.opt_out_recipient.lower()
+            if scope=='account':
+                state='opted_out';outreach_policy='stop'
+            else:
+                scope='recipient' if scope=='recipient' and target else 'thread'
+                state='recipient_opted_out' if scope=='recipient' else 'human_verification'
+                if o['status'] in ('opted_out','outreach_paused','lost','closed','won'):state=o['status']
+            record(con,store,o,'do_not_contact',scope,'' if scope=='account' else target,m['body'],
+                   'simulated_customer_reply',message_id=m['id'])
+            conversation_state='opted_out' if scope=='account' else 'recipient_opted_out' if scope=='recipient' else 'opt_out_scope_review'
+            if scope=='recipient':
+                auth=con.execute('SELECT recipient FROM contact_authorizations WHERE opportunity_id=? AND authorized=1',(o['id'],)).fetchone()
+                if auth and auth[0].lower()!=target:state='needs_review' if o['status']=='replied' else o['status']
         elif d.intent=='not_interested':state='opted_out' if o['status']=='opted_out' else 'lost';outreach_policy='stop'
         elif blocked:state=o['status'];data.update(decision='hold',subject='',body='',recommended_action='Keep outreach stopped. Review the customer response internally before any change to this restriction.');conversation_state='outreach_stopped'
         elif d.intent=='distributor' or (d.channel and d.channel.route=='distributor'):outreach_policy='channel_review'
@@ -138,9 +175,9 @@ def save_reply(store,job,result):
         if not blocked and outreach_policy!='stop' and d.decision=='pursue' and not permitted(o,data,outreach_policy):
             if data.get('engine_version')==ENGINE_VERSION:raise ValueError('Reply proposal violates execution boundaries')
             state='agent_held';data.update(decision='hold',subject='',body='');conversation_state='needs_information'
-        if d.decision=='hold':state=(data.get('commercial_plan') or {}).get('outcome','agent_held')
+        if d.decision=='hold' and not blocked:state=(data.get('commercial_plan') or {}).get('outcome','agent_held')
         from .commercial import persist_investigation,execution_issues
-        if state=='awaiting_approval' and execution_issues(con,o['id'],data):raise ValueError('Reply requires resolved prerequisites and authorized recipient')
+        if state=='awaiting_approval' and execution_issues(con,o['id'],data,reviewing_message=m['id']):raise ValueError('Reply requires resolved prerequisites and authorized recipient')
         if outreach_policy=='stop':data.update(subject='',body='')
         con.execute("INSERT INTO customer_context(opportunity_id,outreach_policy,updated_at) VALUES(?,?,?) ON CONFLICT(opportunity_id) DO UPDATE SET outreach_policy=excluded.outreach_policy,updated_at=excluded.updated_at",(o['id'],outreach_policy,now))
         for field in ('contact','channel'):
@@ -154,7 +191,8 @@ def save_reply(store,job,result):
         data.update(effective_status=state,conversation_status=conversation_state,outreach_policy=outreach_policy,simulated=True)
         con.execute('INSERT INTO reply_interpretations VALUES(?,?,?,?) ON CONFLICT(message_id) DO UPDATE SET job_id=excluded.job_id,body=excluded.body,created_at=excluded.created_at',(m['id'],job['id'],json.dumps(data),now))
         con.execute("UPDATE messages SET status='processed' WHERE id=?",(m['id'],))
-        task_status='completed' if outreach_policy=='stop' else 'awaiting_approval' if state=='awaiting_approval' else 'pending'
+        passive=state in ('monitor','no_action','defer','deferred','lost','opted_out')
+        task_status='completed' if passive or outreach_policy=='stop' or blocked or (d.intent=='opt_out' and scope!='thread') else 'awaiting_approval' if state=='awaiting_approval' else 'pending'
         con.execute('INSERT INTO commercial_tasks VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(message_id) DO UPDATE SET kind=excluded.kind,title=excluded.title,status=excluded.status,updated_at=excluded.updated_at',(uuid4().hex,o['id'],m['id'],d.intent,data['recommended_action'],task_status,now,now))
         analysis={**data,'evidence_hash':o['evidence_hash'],'outreach_kind':'reply','strategy':'response_'+d.intent,'hypotheses':[], 'unresolved_questions':d.uncertainties,'evidence_fields':['action_history'],'reply_to':m['outcome_id'],'reply_message_id':m['id']}
         # Keep the existing assessment read model's route field scalar.
@@ -167,8 +205,8 @@ def save_reply(store,job,result):
             version=con.execute('SELECT COALESCE(MAX(version),0)+1 FROM drafts WHERE opportunity_id=?',(o['id'],)).fetchone()[0]
             con.execute('INSERT INTO drafts VALUES(?,?,?,?,?,?,?,?,?,?)',(uuid4().hex,o['id'],version,o['evidence_hash'],'simulation@example.invalid',d.subject,d.body,'awaiting_approval',json.dumps(analysis),now))
         if outreach_policy=='stop':
-            con.execute("UPDATE jobs SET status='cancelled',finished_at=? WHERE opportunity_id=? AND kind!='reply' AND status IN ('queued','running','blocked_config')",(now,o['id']))
-            con.execute("UPDATE drafts SET status='cancelled' WHERE opportunity_id=? AND status IN ('awaiting_approval','approved')",(o['id'],))
+            from .outreach_controls import cancel_outreach
+            cancel_outreach(con,o['id'],now)
         con.execute('UPDATE opportunities SET status=?,updated_at=? WHERE id=?',(state,now,o['id']))
         con.execute('UPDATE conversations SET status=?,updated_at=? WHERE id=?',(conversation_state,now,m['conversation_id']))
         con.execute("UPDATE jobs SET status='completed',finished_at=? WHERE id=?",(now,job['id']))

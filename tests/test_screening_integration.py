@@ -69,6 +69,41 @@ def test_human_decision_during_investigation_prevents_result(env):
  with pytest.raises(ValueError):save_result(st,job,dict(decision=plan(),review_passed=True))
  assert not st.rows('SELECT * FROM agency_qualifications')
 
+def test_activity_replay_preserves_evidence_and_pending_reassessment(env):
+ s,st,*_=env;r=cleared(env);aid=r['id']
+ record_activity(st,aid,'response_received','Synthetic: please discuss training')
+ after=detail(st,aid);queued=queue(st,s,aid,after['evidence_hash'])
+ record_activity(st,aid,'response_received','Synthetic: please discuss training')
+ assert detail(st,aid)['context_hash']==after['context_hash']
+ assert st.rows('SELECT status FROM jobs WHERE id=?',(queued['job_id'],))[0]['status']=='queued'
+ record_activity(st,aid,'response_received','Synthetic: purchasing has confirmed a new route')
+ assert detail(st,aid)['context_hash']!=after['context_hash']
+
+
+def test_mcp_search_by_state_name_city_and_rejection_source(env,monkeypatch):
+ from test_mcp import TOKEN,call,data
+ s,st,t,write=env
+ original=t['public_agencies'][0]
+ t['public_agencies']=[
+     dict(original,agency_name='Crystal Lake Jail',city='Elsewhere',state='WY',jail_beds='2'),
+     dict(original,agency_name='Harbor Jail',city='Crystal Lake',state='WY',jail_beds='900'),
+     dict(original,agency_name='Wyatt Facility',city='Other',state='KS')]
+ write();screen(st,s)
+ ids={r['name']:r['id'] for r in st.rows('SELECT name,id FROM agency_screenings')}
+ aid=ids['Crystal Lake Jail'];queue(st,s,aid,detail(st,aid)['evidence_hash']);job=st.claim(['agency_qualify'])
+ save_result(st,job,dict(decision=plan('reject'),review_passed=True));st.finish(job['id'])
+ monkeypatch.setenv('CLEARLINE_MCP_TOKEN',TOKEN)
+ with TestClient(create_app(s)) as client:
+  def search(**kwargs):return data(call(client,'query_screened_agencies',kwargs))['items']
+  assert [r['id'] for r in search(q=' wyOMing ')]==[r['id'] for r in search(q='wy')]
+  assert {r['state'] for r in search(q='WY')}=={'WY'}
+  assert [r['matched_on'] for r in search(q='Crystal Lake')]==['name','city']
+  record_decision(st,ids['Harbor Jail'],'rejected','Synthetic test decision')
+  for word in ('reject','rejected'):
+   assert {r['id'] for r in search(outcome=word)}=={aid,ids['Harbor Jail']}
+  assert [r['id'] for r in search(outcome='human_rejected')]==[ids['Harbor Jail']]
+  assert [r['id'] for r in search(outcome='qualification_reject')]==[aid]
+
 
 @pytest.mark.parametrize('field,value',[('recipient',''),('role',''),('route',''),('facts',''),('evidence',''),('contact_verified',False),('authorized',False),('relationship_checked',False)])
 def test_every_contact_prerequisite_blocks(env,field,value):
@@ -125,8 +160,25 @@ def test_budget_unknown_usage_keeps_reservation_and_known_usage_settles(env):
  reserved=usage(st)['reserved_usd'];assert reserved>0
  settle(st,'one',{},429);assert usage(st)['reserved_usd']==reserved
  reserve(st,budget_job(),s,'two',body);settle(st,'two',dict(model=s.model,usage=dict(input_tokens=100,output_tokens=50),service_tier='default'),200)
- result=usage(st);assert result['requests']==2 and result['estimated_usd']==.0007 and result['reserved_usd']==reserved
+ result=usage(st);assert result['requests']==2 and result['estimated_usd']==.00075 and result['reserved_usd']==reserved
  assert result['stages']['investigation']['input_tokens']==100
+
+
+def test_screening_cache_costs_are_reserved_then_settled_at_verified_rates(env):
+ s,st,*_=env
+ reserve(st,budget_job(),s,'cached',request_body())
+ row=st.rows("SELECT * FROM agency_usage WHERE request_id='cached'")[0]
+ assert row['reserved_micro']==row['input_bound']*2.5+row['output_bound']*10
+ details={'cached_tokens':100,'cache_write_tokens':600,'cache_write_tokens_details':{'ttl_30m_tokens':600,'ttl_12h_tokens':0}}
+ response=dict(model=s.model,usage=dict(input_tokens=1000,output_tokens=0,input_tokens_details=details),service_tier='default')
+ settle(st,'cached',response,200)
+ assert usage(st)['estimated_usd']==.00211
+ reserve(st,budget_job(),s,'malformed',request_body())
+ details['cache_write_tokens']=900
+ settle(st,'malformed',response,200)
+ assert st.rows("SELECT state,charged_micro FROM agency_usage WHERE request_id='malformed'")==[{'state':'unknown','charged_micro':None}]
+ with pytest.raises(BudgetLimit,match='cache policy'):
+  reserve(st,budget_job(),s,'long-cache',{**request_body(),'prompt_cache_options':{'ttl':'12h'}})
 
 
 def test_budget_concurrent_limit_is_atomic(env):

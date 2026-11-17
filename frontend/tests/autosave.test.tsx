@@ -8,7 +8,7 @@ const draft:Draft={id:'old',opportunity_id:'account',version:1,evidence_hash:'ha
 beforeEach(()=>{vi.useFakeTimers();vi.mocked(request).mockReset()});
 afterEach(()=>{vi.useRealTimers()});
 it('debounces edits, blocks approval until refreshed version arrives, and does not resave stale IDs',async()=>{
- vi.mocked(request).mockResolvedValue({draft_id:'new'});
+ vi.mocked(request).mockResolvedValue({draft_id:'new',version:2});
  const {result,rerender}=renderHook(({d})=>useDraftAutosave(d),{initialProps:{d:draft}});
  act(()=>result.current.setFields({...result.current.fields,body:'First edit'}));
  await act(async()=>{vi.advanceTimersByTime(400)});
@@ -21,7 +21,7 @@ it('debounces edits, blocks approval until refreshed version arrives, and does n
  expect(result.current.pending).toBe(false);expect(result.current.status).toBe('Saved');
 });
 it('retains failed edits and blocks approval until retry succeeds',async()=>{
- vi.mocked(request).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce({draft_id:'new'});
+ vi.mocked(request).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce({draft_id:'new',version:2});
  const {result}=renderHook(()=>useDraftAutosave(draft));
  act(()=>result.current.setFields({...result.current.fields,body:'Keep this edit'}));
  await act(async()=>{vi.advanceTimersByTime(650)});

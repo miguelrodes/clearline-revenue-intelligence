@@ -72,3 +72,23 @@ class ScheduleInput(ScanInput):
 class RegenerateInput(Input):
     version: int = Field(ge=1)
     request_id: UUID
+
+class ProspectDiscoveryInput(Input):
+    state: str = Field(min_length=2, max_length=2)
+    category: str = Field(min_length=1, max_length=160)
+    keywords: str = Field(default='', max_length=400)
+    maximum: int = Field(default=10, ge=1, le=15)
+    directory_url: str | None = Field(default=None, max_length=2048)
+    instructions: str = Field(default='', max_length=1200)
+    confirmed: bool = Field(default=False, strict=True)
+
+
+class ProspectResearchInput(Input):
+    candidate_ids: list[str] = Field(min_length=1, max_length=3)
+    refresh: bool = Field(default=False, strict=True)
+    confirmed: bool = Field(default=False, strict=True)
+
+
+class ProspectDispositionInput(Input):
+    decision: Literal['select_for_research','hold','reject','resume']
+    rationale: str = Field(min_length=1,max_length=1000)

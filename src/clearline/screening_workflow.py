@@ -54,9 +54,12 @@ def record_decision(store, aid, decision, rationale):
     if decision not in ('accepted','held','rejected') or not rationale.strip():
         raise ValueError('Choose accept, hold or reject and record a specific reason')
     with store.connect(write=True) as con:
-        con.execute("INSERT INTO agency_workflow(agency_id,decision,rationale,updated_at) VALUES(?,?,?,?) ON CONFLICT(agency_id) DO UPDATE SET decision=excluded.decision,rationale=excluded.rationale,updated_at=excluded.updated_at",(aid,decision,rationale.strip(),utcnow()))
-        if decision!='accepted':invalidate(con,aid)
-        log(con,aid,'decision',rationale.strip(),{'decision':decision})
+        rationale = rationale.strip()
+        previous = con.execute('SELECT decision,rationale FROM agency_workflow WHERE agency_id=?',(aid,)).fetchone()
+        if previous is None or tuple(previous) != (decision, rationale):
+            con.execute("INSERT INTO agency_workflow(agency_id,decision,rationale,updated_at) VALUES(?,?,?,?) ON CONFLICT(agency_id) DO UPDATE SET decision=excluded.decision,rationale=excluded.rationale,updated_at=excluded.updated_at",(aid,decision,rationale,utcnow()))
+            if decision!='accepted':invalidate(con,aid)
+            log(con,aid,'decision',rationale,{'decision':decision})
     return state(store,aid)
 
 def record_information(store, aid, information, expected_context):
@@ -140,15 +143,18 @@ def assert_current(con, opp, analysis):
         raise ValueError('Prospect evidence, decision or contact prerequisites changed')
 
 def record_activity(store, aid, kind, note):
-    from .screening import detail
-    row=detail(store,aid)
     if kind not in ('contact_attempted','response_received','advanced') or not note.strip():raise ValueError('Record a supported activity and specific evidence')
-    if row['workflow']['decision']!='accepted':raise ValueError('Only accepted prospects can advance')
     stages={'contact_attempted':'contact_attempted','response_received':'responded','advanced':'advanced'}
     with store.connect(write=True) as con:
-        invalidate(con,aid)
-        con.execute('UPDATE agency_workflow SET stage=?,updated_at=? WHERE agency_id=?',(stages[kind],utcnow(),aid))
-        log(con,aid,kind,note.strip(),{'provenance':'human_reported_simulation','verified_revenue':False})
+        workflow=con.execute("""SELECT w.decision,w.stage FROM agency_workflow w JOIN agency_screenings a
+            ON a.id=w.agency_id WHERE w.agency_id=? AND a.active=1""",(aid,)).fetchone()
+        if not workflow or workflow['decision']!='accepted':raise ValueError('Only accepted prospects can advance')
+        previous=con.execute("""SELECT kind,note FROM agency_activity WHERE agency_id=? AND kind IN
+            ('contact_attempted','response_received','advanced','simulated_send') ORDER BY rowid DESC LIMIT 1""",(aid,)).fetchone()
+        if workflow['stage']!=stages[kind] or not previous or (previous['kind'],previous['note'])!=(kind,note.strip()):
+            invalidate(con,aid)
+            con.execute('UPDATE agency_workflow SET stage=?,updated_at=? WHERE agency_id=?',(stages[kind],utcnow(),aid))
+            log(con,aid,kind,note.strip(),{'provenance':'human_reported_simulation','verified_revenue':False})
     return state(store,aid)
 
 def sent(con, aid, draft_id):

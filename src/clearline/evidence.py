@@ -1,5 +1,7 @@
 """Account-scoped evidence access. Original rows are never edited or rematched here."""
 import csv,json
+from collections import defaultdict
+from decimal import Decimal
 from functools import lru_cache
 from hashlib import sha256
 from .data import digest,canonical,cents
@@ -10,30 +12,63 @@ SCHEMA='''CREATE TABLE IF NOT EXISTS investigation_tasks(
  title TEXT NOT NULL, owner TEXT NOT NULL, reason TEXT NOT NULL, evidence_refs TEXT NOT NULL,
  blocking INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);'''
 
-def context_hash(con,oid):
-    o=con.execute('SELECT evidence_hash,holds FROM opportunities WHERE id=?',(oid,)).fetchone()
-    # Only external evidence invalidates reasoning; generated assessments/tasks do not invalidate themselves.
-    material={'evidence_hash':o['evidence_hash'] if o else None}
+_CONTEXT_FIELDS = {
+    'messages': 'id,direction,subject,body,reply_to',
+    'outcomes': 'id,kind,note,amount_cents,reference',
+    'customer_context': 'contact,channel,outreach_policy',
+    'contact_authorizations': 'recipient,role,route,evidence,authorized,updated_at',
+    'investigation_resolutions': 'task_id,resolution,updated_at',
+    'contact_clearance_notes': 'task_id,contact_name,recipient,role,phone,route,distributor,verification_evidence,status,updated_at',
+}
+
+
+def _context_material(account):
     from .action_policy import SOFT_HOLDS
-    holds=set(json.loads(o['holds'])) if o else set()
-    if 'possible_missing_state_alias' in holds and not holds-SOFT_HOLDS:
-        # Only accounts whose permitted action changed need expensive reassessment.
-        material['execution_policy_revision']='missing-state-neutral-support-v1'
-    for table,fields in [('messages','id,direction,subject,body,reply_to'),('outcomes','id,kind,note,amount_cents,reference'),('customer_context','contact,channel,outreach_policy')]:
-        material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
-    for table,fields in [('contact_authorizations','recipient,role,route,evidence,authorized,updated_at'),('investigation_resolutions','task_id,resolution,updated_at')]:
-        material[table]=[dict(r) for r in con.execute(f'SELECT {fields} FROM {table} WHERE opportunity_id=? ORDER BY rowid',(oid,))]
-    contact_notes=[dict(r) for r in con.execute("SELECT task_id,contact_name,recipient,role,phone,route,distributor,verification_evidence,status,updated_at FROM contact_clearance_notes WHERE opportunity_id=? AND status='verified'",(oid,))]
-    # Preserve cached assessments for accounts with no verified contact changes.
-    if contact_notes:material['contact_clearance_notes']=contact_notes
-    epoch=con.execute('SELECT value FROM controls WHERE name=?',('reassessment:'+oid,)).fetchone()
-    material['reassessment_epoch']=epoch['value'] if epoch else None
-    return digest(material)
+    material = {'evidence_hash': account['evidence_hash'] if account else None}
+    holds = set(json.loads(account['holds'])) if account else set()
+    if 'possible_missing_state_alias' in holds and not holds - SOFT_HOLDS:
+        material['execution_policy_revision'] = 'missing-state-neutral-support-v1'
+    for table in _CONTEXT_FIELDS:
+        if table != 'contact_clearance_notes':
+            material[table] = []
+    material['reassessment_epoch'] = None
+    return material
+
+
+def _context_hashes(con, accounts):
+    """Use the same evidence fields and row ordering for one account or a whole read snapshot."""
+    materials = {oid: _context_material(account) for oid, account in accounts.items()}
+    if not materials:
+        return {}
+    single = len(materials) == 1
+    predicate = '= ?' if single else 'IN (SELECT value FROM json_each(?))'
+    ids = (next(iter(materials)) if single else json.dumps(list(materials)),)
+    for table, fields in _CONTEXT_FIELDS.items():
+        verified = " AND status='verified'" if table == 'contact_clearance_notes' else ''
+        query = f'SELECT opportunity_id,{fields} FROM {table} WHERE opportunity_id {predicate}{verified} ORDER BY rowid'
+        for row in con.execute(query, ids):
+            record = dict(row)
+            materials[record.pop('opportunity_id')].setdefault(table, []).append(record)
+    names = ['reassessment:' + oid for oid in materials]
+    for row in con.execute(f'SELECT name,value FROM controls WHERE name {predicate}',
+                           (names[0] if single else json.dumps(names),)):
+        materials[row['name'].removeprefix('reassessment:')]['reassessment_epoch'] = row['value']
+    return {oid: digest(material) for oid, material in materials.items()}
+
+
+def context_hash(con,oid):
+    row = con.execute('SELECT evidence_hash,holds FROM opportunities WHERE id=?',(oid,)).fetchone()
+    return _context_hashes(con, {oid: row})[oid]
+
+
+def assessment_eligible(assessment):
+    from .store import utcnow
+    return bool(assessment and assessment.get('engine_version') == ENGINE_VERSION
+                and (not assessment.get('reassess_at') or assessment['reassess_at'] > utcnow()))
+
 
 def current_assessment(con,oid,assessment):
-    from .store import utcnow
-    if assessment and assessment.get('reassess_at') and assessment['reassess_at']<=utcnow():return False
-    return bool(assessment and assessment.get('engine_version')==ENGINE_VERSION and assessment.get('context_hash')==context_hash(con,oid))
+    return assessment_eligible(assessment) and assessment.get('context_hash') == context_hash(con,oid)
 
 @lru_cache(maxsize=12)
 def source_records(path,expected):
@@ -49,7 +84,36 @@ class EvidenceAccess:
         with store.connect() as con:self.version=context_hash(con,self.oid)
         scans=store.rows('SELECT summary FROM scans ORDER BY created_at DESC,rowid DESC LIMIT 1')
         self.hashes=json.loads(scans[0]['summary']).get('hashes',{}) if scans else {}
+        self.finding_review = (job.get('kind')=='analyze'
+            and len(self.opp['evidence'].get('source_rows',[]))>100
+            and bool(store.rows('SELECT 1 FROM investigation_resolutions WHERE opportunity_id=? LIMIT 1',(self.oid,))))
+
+    def finding_packet(self):
+        """Cover the complete assigned ledger once. Exact detail remains available to both reviewers."""
+        self.overview()
+        self.purchasing()
+        self.relationships()
+        page=self.outputs['relationships:0']['next_offset']
+        while page is not None:
+            self.relationships(page)
+            page=self.outputs[f'relationships:{page}']['next_offset']
+        self.catalogue()
+        self.identity()
+        self.previous()
+        return self.outputs
+
     def record(self,section,value):
+        if self.finding_review and section=='overview':
+            # Canonical signal IDs, amounts and payloads already appear in detected_signals.
+            account=dict(value['account'])
+            account.pop('commercial_signals',None)
+            account['assigned_source_rows']=len(account.pop('source_rows',[]))
+            value={**value,'account':account}
+        if self.finding_review and section=='identity':
+            for candidate in value['related_records']:
+                # Keep other identity candidates' evidence. Only the current account is indexed here.
+                if candidate['id']==self.oid:
+                    candidate['assigned_source_rows']=len(candidate.pop('source_rows') or [])
         self.accessed.add(section);self.outputs[section]=value
         def refs(v):
             if isinstance(v,dict):
@@ -92,6 +156,18 @@ class EvidenceAccess:
             'source_holds':'Remain attached to financial evidence. Identity conflicts block outreach. Operational/channel warnings require action-specific review, not blanket stopping.'},
             'manifest':{'order_rows':len(e.get('source_rows',[])),'messages':self.store.rows('SELECT COUNT(*) n FROM messages WHERE opportunity_id=?',(self.oid,))[0]['n']}})
     def purchasing(self,offset=0,status='all'):
+        if self.finding_review:
+            if offset<0:raise ValueError('Invalid evidence page')
+            if status=='all':
+                if offset:return json.dumps({'complete':True,'note':'The complete purchase summary is page 0. For exact records use raw, order:<ID> or ref:<source ref>.'})
+                return self.purchase_summary()
+            if status=='raw' or status.startswith(('order:','ref:')):
+                rows=self.orders()
+                if status!='raw':
+                    field,_,key=status.partition(':')
+                    rows=[r for r in rows if r['order_id' if field=='order' else 'ref']==key]
+                return self.record(f'purchases:{status}:{offset}',{'ref':'purchasing','rows':rows[offset:offset+100],
+                    'total':len(rows),'next_offset':offset+100 if offset+100<len(rows) else None})
         if offset<0 or status not in ('all','open','credit_memo','invoiced'):raise ValueError('Invalid evidence page')
         rows=self.orders();selected=[r for r in rows if status=='all' or r['status']==status]
         # These counts describe source dates, not inventory usage or confirmed fulfillment.
@@ -103,6 +179,37 @@ class EvidenceAccess:
         return self.record(f'purchases:{status}:{offset}',{'ref':'purchasing','kind':'source_rows_and_calculations','periods':periods,
             'units':{'unit_price':'USD dollars','line_total':'USD dollars','*_cents':'integer USD cents','qty':'packs or training sessions'},'rows':selected[offset:offset+100],'total':len(selected),'next_offset':offset+100 if offset+100<len(selected) else None,
             'note':'Rows preserve original quantity, unit price, line total, channel, identity, and date; open orders are not booked revenue or known overdue.'})
+
+    def purchase_summary(self):
+        rows=self.orders()
+        tasks=self.store.rows('SELECT evidence_refs FROM investigation_tasks WHERE opportunity_id=? AND status IN (\'pending\',\'resolved\')',(self.oid,))
+        refs={ref for t in tasks for ref in json.loads(t['evidence_refs'])}
+        exceptions={r['order_id'] for r in rows if r['status']!='invoiced' or r['ref'] in refs}
+        exceptions.update(order.removesuffix('-CR') for order in tuple(exceptions))
+        invoices=defaultdict(list)
+        detail=[]
+        for r in rows:
+            if r['status']=='invoiced':
+                invoices[(r['order_date'][:7],r['sku'],r['sales_channel'])].append(r)
+            if (r['order_id'] in exceptions or not r['order_date']
+                or Decimal(r['qty'])<=0 or cents(r['line_total'])<=0):
+                detail.append(r)
+        summaries=[]
+        for (month,sku,channel),group in sorted(invoices.items()):
+            summaries.append([month or 'undated',sku,channel,len(group),
+                str(sum(Decimal(r['qty']) for r in group)),sum(cents(r['line_total']) for r in group)])
+        dates=sorted({r['order_date'] for r in rows if r['status']=='invoiced' and r['order_date'] and cents(r['line_total'])>0})
+        comparable_periods={}
+        for year in ('2025','2026'):
+            start,end=year+'-01-01',year+'-11-01'
+            period=[r for r in rows if start<=r['order_date']<end]
+            comparable_periods[year]={'purchase_dates':sum(start<=date<end for date in dates),
+                'open_value_cents':sum(cents(r['line_total']) for r in period if r['status']=='open'),
+                'credit_cents':sum(cents(r['line_total']) for r in period if r['status']=='credit_memo')}
+        return self.record('purchases:all:0',{'ref':'purchasing','total':len(rows),'next_offset':None,
+            'invoice_columns':['month','sku','channel','source_lines','qty_packs_or_sessions','invoiced_value_cents'],
+            'invoice_totals':summaries,'distinct_positive_invoice_dates':dates,'january_october':comparable_periods,'detail_rows':detail,
+            'note':'Complete assigned history, including duplicate-looking lines. Invoice totals group every invoice once. Detail rows overlap those totals and include open orders, credits, companion lines, task-linked orders, undated and nonpositive lines. Detail unit_price/line_total are USD dollars. Open lines are not booked revenue. Use raw pages, order:<ID> or ref:<source ref> for exact records when needed.'})
     def relationships(self,offset=0):
         if offset<0:raise ValueError('Invalid page')
         e=self.opp['evidence'];key=self.opp['account_key']
@@ -115,7 +222,14 @@ class EvidenceAccess:
         tasks=self.store.rows('SELECT * FROM commercial_tasks WHERE opportunity_id=?',(self.oid,))
         outcomes=self.store.rows('SELECT * FROM outcomes WHERE opportunity_id=? ORDER BY created_at,rowid',(self.oid,))
         for x in outcomes:x['ref']='outcome:'+x['id']
-        return self.record(f'relationships:{offset}',{'ref':'relationship','crm':crm,'context':ctx,'messages':messages[offset:offset+100],
+        inquiries={}
+        if self.finding_review and offset==0:
+            from .internal_inquiries import list_inquiries
+            inquiries['internal_inquiries']=[{
+                'id':i['id'],'task_ids':i['task_ids'],'status':i['status'],'simulated_send_at':i['sent_at'],
+                'replies':[{'reported_body':r['body'],'record_refs':r['record_refs'],'confirmed_task_ids':r['confirmed_task_ids']} for r in i['replies']]
+            } for i in list_inquiries(self.store,self.oid)['inquiries']]
+        return self.record(f'relationships:{offset}',{'ref':'relationship','crm':crm,'context':ctx,'messages':messages[offset:offset+100],**inquiries,
             'total_messages':len(messages),'next_offset':offset+100 if offset+100<len(messages) else None,'outcomes':outcomes,
             'tasks':tasks,'investigation_tasks':self.store.rows("SELECT id,title,owner,reason,evidence_refs,blocking,status FROM investigation_tasks WHERE opportunity_id=?",(self.oid,)),
             'contact_clearance':contact_clearance,'contact_authorizations':contact_authorizations,
@@ -131,12 +245,18 @@ class EvidenceAccess:
     def catalogue(self):
         return self.record('catalogue',{'ref':'catalogue','kind':'fictional_product_records','products':self.source('products'),
             'note':'List prices are historical, not an authorized current quote. No unsupported efficacy, discounts or training availability promises.'})
-    def previous(self,offset=0):
+    def previous(self,offset=0,full=False):
         rows=self.store.rows("SELECT id,details,created_at FROM events WHERE opportunity_id=? AND kind='agent_decision' ORDER BY id DESC",(self.oid,))
         for r in rows:r['ref']='assessment:'+str(r['id']);r['details']=json.loads(r['details'])
         drafts=self.store.rows('SELECT id,version,status,subject,body FROM drafts WHERE opportunity_id=? ORDER BY version DESC',(self.oid,))
-        return self.record(f'previous:{offset}',{'ref':'previous_work','kind':'AI_interpretations_not_source_truth','assessments':rows[offset:offset+10],
-            'total':len(rows),'next_offset':offset+10 if offset+10<len(rows) else None,'drafts':drafts})
+        page_size=1 if full else 10
+        page=rows[offset:offset+page_size]
+        if self.finding_review and not full:
+            for row in page:
+                row['details']={k:row['details'][k] for k in ('decision','objective','recommended_action','strategy','review_failed') if k in row['details']}
+        key='previous_full' if full else 'previous'
+        return self.record(f'{key}:{offset}',{'ref':'previous_work','kind':'AI_interpretations_not_source_truth','assessments':page,
+            'total':len(rows),'next_offset':offset+page_size if offset+page_size<len(rows) else None,'drafts':drafts})
     def tools(self):
         from agents import function_tool
         @function_tool
@@ -145,7 +265,7 @@ class EvidenceAccess:
             return self.overview()
         @function_tool
         def get_purchase_history(offset:int=0,status:str='all')->str:
-            """Read exact assigned transaction rows with quantities, prices, dates, channel; page by 100. status all/open/credit_memo/invoiced."""
+            """Read account purchases. On finding reviews, all returns complete totals and material lines; raw, order:<ID> or ref:<source ref> retrieves exact detail. Open/credit_memo/invoiced filter rows; use lowercase status and offsets from the result."""
             return self.purchasing(offset,status)
         @function_tool
         def get_relationship_history(offset:int=0)->str:
@@ -160,9 +280,9 @@ class EvidenceAccess:
             """Read supplied product and training records; historical list prices are not a current quote."""
             return self.catalogue()
         @function_tool
-        def get_previous_work(offset:int=0)->str:
-            """Read previous AI assessments (page by 10) and prepared drafts; these are interpretations, not verified facts."""
-            return self.previous(offset)
+        def get_previous_work(offset:int=0,full:bool=False)->str:
+            """Read previous AI decisions and drafts. Finding reviews summarize old decisions. Set full=true and offset to retrieve one full assessment. These are not verified facts."""
+            return self.previous(offset,full)
         @function_tool
         def get_product_associations()->str:
             """Read reproducible portfolio product associations with sample sizes and reliability; not proof of demand."""

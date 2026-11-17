@@ -36,7 +36,8 @@ def create_app(settings=None):
     @app.middleware("http")
     async def local_mutations(request: Request, call_next):
         if request.url.path not in ("/mcp","/mcp/") and request.method not in ("GET","HEAD","OPTIONS"):
-            if request.headers.get("x-clearline-client") != "web" or request.headers.get("origin", "http://localhost:3000") not in ("http://localhost:3000","http://127.0.0.1:3000","http://localhost:3001","http://127.0.0.1:3001"):
+            local_origins={f"http://{host}:{port}" for host in ("localhost","127.0.0.1") for port in (3000,3001,3002)}
+            if request.headers.get("x-clearline-client") != "web" or request.headers.get("origin", "http://localhost:3000") not in local_origins:
                 return JSONResponse({"detail":"Local app requests only"}, status_code=403)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -77,10 +78,16 @@ def create_app(settings=None):
     @app.get('/api/accounts/{oid}/commercial-work')
     def commercial_work(oid:str):
         from .task_purpose import task_purpose
-        service.account(oid)
+        from .practical_actions import practical_actions
+        from .internal_inquiries import list_inquiries
+        account=service.account(oid)
         notes=store.rows('SELECT * FROM contact_clearance_notes WHERE opportunity_id=?',(oid,))
         tasks=store.rows("SELECT * FROM investigation_tasks WHERE opportunity_id=? AND status='pending'",(oid,))
-        return {'signals':service.commercial_signals(oid),'tasks':[task | task_purpose(task) for task in tasks], 'authorizations':store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(oid,)), 'contact_clearance':notes[0] if notes else None}
+        recovery=account['workflow']=='recovery'
+        reviews=store.rows("SELECT id,status,error,finished_at FROM jobs WHERE opportunity_id=? AND kind='analyze' ORDER BY created_at DESC,rowid DESC LIMIT 1",(oid,)) if recovery else []
+        return {'signals':service.commercial_signals(oid),'tasks':[task | task_purpose(task) for task in tasks], 'authorizations':store.rows('SELECT * FROM contact_authorizations WHERE opportunity_id=?',(oid,)), 'contact_clearance':notes[0] if notes else None,
+                'practical_actions':practical_actions(store,settings,oid) if recovery else [],'review_job':reviews[0] if reviews else None,
+                'inquiry_data':list_inquiries(store,oid) if recovery else None}
     @app.post('/api/accounts/{oid}/contact-authorization')
     def authorize_contact(oid:str,body:AuthorizationInput):return service.authorize_contact(oid,**body.model_dump())
     @app.post('/api/accounts/{oid}/contact-clearance')
@@ -90,6 +97,48 @@ def create_app(settings=None):
 
     @app.get('/api/features')
     def features():return {'prospect_screening':settings.screening_enabled}
+    @app.get('/api/overview/prospects')
+    def prospect_overview():
+        from .prospect_overview import overview
+        return overview(store, settings.screening_enabled)
+    @app.get('/api/prospect-pipeline')
+    def prospect_pipeline(q:str='',origin:str='',state:str='',segment:str='',stage:str='',qualification:str='',
+                          min_score:int=Query(0,ge=0,le=100),offset:int=Query(0,ge=0),limit:int=Query(25,ge=1,le=100)):
+        return service.prospect_pipeline(q=q,origin=origin,state=state,segment=segment,stage=stage,
+                                        qualification=qualification,min_score=min_score,offset=offset,limit=limit)
+
+    @app.get('/api/prospect-pipeline/candidates/{candidate_id}')
+    def prospect_candidate(candidate_id:str):
+        return service.candidate(candidate_id)
+
+    @app.post('/api/prospect-pipeline/candidates/{candidate_id}/decision')
+    def prospect_disposition(candidate_id:str,body:ProspectDispositionInput):
+        return service.prospect_disposition(candidate_id,body.decision,body.rationale)
+
+    @app.post('/api/prospect-pipeline/candidates/{candidate_id}/authorization')
+    def prospect_authorization(candidate_id:str,body:AuthorizationInput):
+        return service.authorize_prospect(candidate_id,**body.model_dump())
+
+    @app.post('/api/prospect-pipeline/discovery/preview')
+    def preview_discovery(body:ProspectDiscoveryInput):
+        return service.prospect_run('discovery',body,preview=True)
+
+    @app.post('/api/prospect-pipeline/discovery',status_code=202)
+    def discover(body:ProspectDiscoveryInput):
+        return service.prospect_run('discovery',body,preview=False)
+
+    @app.post('/api/prospect-pipeline/research/preview')
+    def preview_prospect_research(body:ProspectResearchInput):
+        return service.prospect_run('research',body,preview=True)
+
+    @app.post('/api/prospect-pipeline/research',status_code=202)
+    def research_prospects(body:ProspectResearchInput):
+        return service.prospect_run('research',body,preview=False)
+
+    @app.get('/api/prospect-pipeline/jobs/{job_id}')
+    def get_prospect_job(job_id:str):
+        return service.prospect_job(job_id)
+
     @app.get('/api/screening')
     def screening_summary():return service.screening_summary()
     @app.get('/api/screening/agencies')
@@ -206,7 +255,10 @@ def create_app(settings=None):
 
     @app.get("/api/brief")
     def operational_brief():
-        return service.operational_brief()
+        from .briefing import current_brief
+        from .demo import CONVERSATION_SESSION
+        return {**current_brief(store,live_fallback=True),
+                'refresh_mode':'read' if store.path.resolve()==CONVERSATION_SESSION else 'generate'}
 
     @app.post("/api/brief",status_code=202)
     def regenerate_brief():
@@ -256,6 +308,19 @@ def create_app(settings=None):
     def decide(did: str, body: ApprovalInput):
         return service.decide(did,body)
 
+    class OutreachControlInput(BaseModel):
+        action:Literal['pause','resume','do_not_contact']
+        scope:Literal['account','recipient']|None=None
+        reason:str=Field(default='',max_length=12000)
+        recipient:str=Field(default='',max_length=320)
+        reconsider_on:str|None=None
+        clarify_id:str|None=None
+
+    @app.post("/api/accounts/{oid}/outreach-control")
+    def outreach_control(oid:str,body:OutreachControlInput):
+        from .outreach_controls import change
+        return change(store,oid,**body.model_dump())
+
     @app.get("/api/accounts/{oid}/conversation")
     def conversation(oid: str):
         return service.conversation(oid)
@@ -284,5 +349,7 @@ def create_app(settings=None):
     def regenerate(did:str,body:RegenerateInput):
         return service.regenerate_draft(did,body.version,body.request_id)
 
+    from .internal_inquiries import install_routes as install_internal_routes
+    install_internal_routes(app,store,settings)
     app.mount("/",mcp_authenticated)
     return app

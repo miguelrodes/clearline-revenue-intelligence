@@ -3,9 +3,11 @@ import Link from 'next/link';
 import {useSearchParams} from 'next/navigation';
 import {useState,useRef,useEffect,type ReactNode} from 'react';
 import {useApi,request,refresh,money,number,time,label} from '@/lib/api';
-import {actionDescription} from '@/lib/account-presentation';
+import {actionDescription,actionFinancialCents,taskInquiryLabel,type TaskInquiryState,type RevenueContext} from '@/lib/account-presentation';
+import {PipelineBrief,ProspectActionRow} from './prospect-pipeline';
+import {pipelinePath,type Pipeline} from '@/lib/prospect-pipeline';
 import type {Overview} from '@/lib/types';
-import {RecommendedActionRow} from '@/components/recommended-action';
+import {RecommendedActionRow,RecommendedActionList} from '@/components/recommended-action';
 
 type Execution={api_blocked?:{code:string;message:string}|null;active_investigations:{id:string;kind:string;account_name:string;started_at:string}[];model_requests_inflight:number;queue_ready:number;retry_wait:number;jobs:Record<string,number>;average_seconds:number|null;recommendations_per_minute_5m:number;model_requests:number;input_tokens:number;output_tokens:number;estimated_cost_usd:number|null;unpriced_records:number;capacity:{active_limit:number;configured_max:number;cooldown_seconds:number;peak_investigations:number}|null;batches:{id:string;total:number;counts:Record<string,number>}[]};
 type Campaign={id:string;name:string;status:string;ready:number;pending:number;simulated_deliveries:number;scheduled_followups:number;recorded_outcomes:number;historical_decline_cents:number;members:{opportunity_id:string;name:string;state?:string;ready:boolean;status:string;exclusion:string|null;job_status:string|null;assessment:{decision:string;strategy?:string;recommended_action:string}|null;draft:{id:string;version:number;subject:string;body:string;recipient:string;snapshot_hash:string}|null}[]};
@@ -29,40 +31,59 @@ export function ExecutionPanel(){
  <div className="table-foot">Current capacity: {d.capacity?.active_limit||'—'} concurrent jobs · Configured ceiling: {d.capacity?.configured_max||'—'} · Peak this session: {d.capacity?.peak_investigations||0}{d.capacity?.cooldown_seconds?` · Rate-limit cooldown ${d.capacity.cooldown_seconds}s`:''}. {b&&`Latest batch: ${(b.counts.completed||0)+(b.counts.cached||0)} of ${b.total} assessments complete; ${b.counts.cached||0} reused. `}Usage covers returned provider responses; interrupted requests may have unreported usage. Estimates exclude unknown web-tool fees.</div></section>
 }
 
-type BriefMember={id:string;name:string;href:string;task:string;historical_decline_cents?:number|null;due_at?:string|null;subject?:string|null;last_sent_at?:string|null};
-type BriefPriority={title:string;text:string;action_id?:string;revenue_context?:{historical_decline_cents:number;accounts:number;excludes_distributors:boolean}};
-type Briefing={brief:{summary:string;summary_points?:string[];priority_items?:BriefPriority[];created_at:string;actions:{id:string;title:string;why:string;href:string;accounts:number;historical_decline_cents:number|null;button_label?:string;scope_label?:string;financial_cents?:number|null;financial_label?:string;urgency?:string|null;recommended_order?:number;time_priority?:number;earliest_due_at?:string|null;members?:BriefMember[];team?:string|null}[]}|null;stale:boolean;last_generated_at:string|null;job:{status:string;error:string|null}|null};
+type BriefMember={inquiry_state?:TaskInquiryState;id:string;name:string;href:string;task:string;historical_decline_cents?:number|null;due_at?:string|null;subject?:string|null;last_sent_at?:string|null};
+type BriefPriority={title:string;text:string;action_id?:string;revenue_context?:RevenueContext};
+type WaitingGroup={id:string;title:string;why:string;href:string;accounts:number;tasks:number;button_label?:string};
+type Briefing={brief:{waiting?:WaitingGroup[];summary:string;summary_points?:string[];priority_items?:BriefPriority[];created_at:string|null;source?:'live_actions';actions:{id:string;title:string;why:string;href:string;accounts:number;historical_decline_cents:number|null;button_label?:string;scope_label?:string;financial_cents?:number|null;financial_label?:string;urgency?:string|null;recommended_order?:number;time_priority?:number;earliest_due_at?:string|null;members?:BriefMember[];team?:string|null;revenue_context?:RevenueContext}[]}|null;stale:boolean;refresh_mode?:'read'|'generate';last_generated_at:string|null;job:{status:string;error:string|null}|null};
 function BriefRevenue({point}:{point:BriefPriority}){
  const context=point.revenue_context;
- if(!context||context.historical_decline_cents<=0||/\$/.test(point.text))return null;
+ if(!context||context.historical_decline_cents==null||context.historical_decline_cents<=0||/\$/.test(point.text))return null;
  const amount=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',notation:'compact',maximumFractionDigits:context.historical_decline_cents>=100000000?2:0}).format(context.historical_decline_cents/100);
  const detail=`${money(context.historical_decline_cents)} historical purchasing decline across ${context.accounts} customer accounts in this group.${context.excludes_distributors?' Distributor totals are excluded to avoid double counting.':''} This is the purchasing gap to investigate, not a forecast of recoverable or new revenue. Groups may overlap; do not add their amounts.`;
  return <span className="brief-revenue-context" title={detail}> — <strong>{amount}</strong> historical decline{context.excludes_distributors?' (excl. distributors)':''}.</span>;
 }
-export function OperationalBriefing({phaseOneOnly=true}:{phaseOneOnly?:boolean}={}){
+export function OperationalBriefing({prospectsEnabled=false}:{prospectsEnabled?:boolean}={}){
  const {data,error}=useApi<Briefing>('/brief');const {data:overview}=useApi<Overview>('/overview');const [message,setMessage]=useState('');const [busy,setBusy]=useState(false);
- const pending=data?.job&&['queued','running'].includes(data.job.status);
- const [sort,setSort]=useState('recommended');const listRef=useRef<HTMLOListElement>(null);const [listHeight,setListHeight]=useState<number>();
+ const readOnlyRefresh=data?.refresh_mode==='read';
+ const pending=!readOnlyRefresh&&data?.job&&['queued','running'].includes(data.job.status);
+ const [sort,setSort]=useState('recommended');
  const allActions=data?.brief?.actions||[];
- const actions=[...allActions].sort((a,b)=>sort==='revenue'?(b.financial_cents??b.historical_decline_cents??-1)-(a.financial_cents??a.historical_decline_cents??-1):sort==='time'?(a.time_priority??3)-(b.time_priority??3)||(a.earliest_due_at||'9999').localeCompare(b.earliest_due_at||'9999')||(a.recommended_order??0)-(b.recommended_order??0):(a.recommended_order??0)-(b.recommended_order??0)).slice(0,10);
- useEffect(()=>{const list=listRef.current;if(!list)return;const measure=()=>{const rows=Array.from(list.querySelectorAll(':scope > li > .brief-action-main')) as HTMLElement[];setListHeight(rows.length>=4?rows.slice(0,3).reduce((n,r)=>n+(r.getBoundingClientRect().height-(r.querySelector('details[open] .brief-member-list')?.getBoundingClientRect().height||0)),0)+(rows[3].getBoundingClientRect().height-(rows[3].querySelector('details[open] .brief-member-list')?.getBoundingClientRect().height||0))/2:undefined)};if(typeof ResizeObserver==='undefined'){measure();return}const observer=new ResizeObserver(measure);observer.observe(list);list.querySelectorAll(':scope > li > .brief-action-main').forEach(row=>observer.observe(row));measure();return()=>observer.disconnect()},[data?.brief,sort]);
- useEffect(()=>{listRef.current?.scrollTo?.({top:0,behavior:'smooth'})},[sort]);
- return <section className="operational-brief" aria-label="AI operational briefing">
- <div className="brief-heading"><h1>Overview Brief</h1><small>{data?.last_generated_at?`Last updated ${time(data.last_generated_at)}`:data?.brief?`Last updated ${time(data.brief.created_at)}`:''}</small></div>
- {data?.brief&&<ul className="brief-summary brief-summary-points" aria-label="Overview brief priorities" tabIndex={0}>{(data.brief.priority_items?.length?data.brief.priority_items:(data.brief.summary_points?.length?data.brief.summary_points:[data.brief.summary]).map(text=>({title:"",text}))).slice(0,5).map((point,i)=><li key={i}>{point.title&&<><strong>{point.title}</strong>{": "}</>}{point.text}<BriefRevenue point={point}/></li>)}</ul>}
- <div className="brief-actions-header"><h2>Recommend Actions</h2><div className="brief-controls"><select aria-label="Sort recommended actions" value={sort} onChange={e=>setSort(e.target.value)}><option value="recommended">Recommended</option><option value="revenue">Revenue impact</option><option value="time">Time-sensitive</option></select>
- <button className="action-link" disabled={busy||Boolean(pending)} onClick={async()=>{setBusy(true);try{await request('/brief','POST');setMessage('Updating your priorities…');refresh()}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}}}>{pending?'Updating…':'Refresh briefing'}</button></div>
- </div>
- {error?<p className="brief-summary" role="alert">{error}</p>:data?.brief?<>
-
- {actions.length?<ol ref={listRef} className="brief-actions" aria-label="Prioritized recommendations" tabIndex={0} style={{maxHeight:listHeight}}>{actions.map(a=><li key={a.id}>
- <RecommendedActionRow title={a.title} description={actionDescription(a,overview?.summary?.as_of)} href={a.href.startsWith('/actions?group=')?`${typeof window!=='undefined'&&window.location.pathname==='/'?'/':'/actions'}?${a.href.split('?')[1]}`:a.href} buttonLabel={a.button_label||'Open'} financialCents={a.financial_cents??a.historical_decline_cents} financialLabel={a.financial_label?.startsWith('Historical purchasing decline associated')?'Historical decline · customer records need verification':a.financial_label} scopeLabel={`${a.scope_label||`${a.accounts} customer${a.accounts===1?'':'s'}`}${a.team?` · ${a.team}`:''}`}>
+ const actions=[...allActions].sort((a,b)=>sort==='revenue'?(actionFinancialCents(b)??-1)-(actionFinancialCents(a)??-1):sort==='time'?(a.time_priority??3)-(b.time_priority??3)||(a.earliest_due_at||'9999').localeCompare(b.earliest_due_at||'9999')||(a.recommended_order??0)-(b.recommended_order??0):(a.recommended_order??0)-(b.recommended_order??0)).slice(0,10);
+ const pipeline=useApi<Pipeline>(prospectsEnabled?pipelinePath+'?limit=1':null);
+ const [scope,setScope]=useState('all');
+ useEffect(()=>{try{const saved=localStorage.getItem('clearline.actions.scope');if(saved==='existing'||saved==='prospects')setScope(saved)}catch{}},[]);
+ const existingRows=(!prospectsEnabled||scope!=='prospects'?actions:[]).map(a=><li key={'account:'+a.id}>
+ <RecommendedActionRow title={a.title} description={actionDescription(a,overview?.summary?.as_of)} href={a.href.startsWith('/actions?group=')?`${typeof window!=='undefined'&&window.location.pathname==='/'?'/':'/actions'}?${a.href.split('?')[1]}`:a.href} buttonLabel="Review" financialCents={actionFinancialCents(a)} financialLabel={a.revenue_context?`Historical purchasing decline · ${a.revenue_context.accounts} of ${a.revenue_context.total_accounts} accounts${a.revenue_context.excluded_distributor_accounts?` · ${a.revenue_context.excluded_distributor_accounts} distributor${a.revenue_context.excluded_distributor_accounts===1?'':'s'} excluded`: ''}`:a.financial_label?.startsWith('Historical purchasing decline associated')?'Historical decline · customer records need verification':a.financial_label} scopeLabel={`${a.scope_label||`${a.accounts} customer${a.accounts===1?'':'s'}`}${a.team?` · ${a.team}`:''}`}>
  {a.earliest_due_at?<small>Next follow-up: {time(a.earliest_due_at)}</small>:a.urgency&&<small>{a.urgency}</small>}
- {!!a.members?.length&&<details className="brief-members"><summary>View {a.accounts} customer{a.accounts===1?'':'s'}</summary><div className="brief-member-list">{a.members.map((m,j)=><div className="brief-member" key={`${m.id}-${j}`}><Link className="text-link" href={m.href}>{m.name}</Link><p>{m.task}</p>{m.subject&&<p>{m.last_sent_at?'Previous email':'Prepared email'}: {m.subject}</p>}<small>{m.due_at&&<>Scheduled {time(m.due_at)} · </>}{m.last_sent_at&&<>Last sent {time(m.last_sent_at)} · </>}{(m.historical_decline_cents??0)>0&&<><strong>{money(m.historical_decline_cents!)}</strong> historical purchasing decline</>}</small></div>)}</div></details>}
- </RecommendedActionRow></li>)}</ol>:<p className="brief-summary">No Phase 1 customer-recovery actions need attention right now.</p>}
-
- </>:<p className="brief-summary">{data?.stale?'Things have changed. We are updating your next steps.':'Your next steps will appear here once the review is ready.'}</p>}
- {data?.job&&['failed','blocked_config'].includes(data.job.status)&&<p className="brief-summary" role="alert">We could not update your next steps. <Link className="text-link" href="/activity?status=errors">Review failed jobs</Link></p>}
+ {!!a.members?.length&&<details className="brief-members"><summary>View {a.accounts} customer{a.accounts===1?'':'s'}</summary><div className="brief-member-list">{a.members.map((m,j)=><div className="brief-member" key={`${m.id}-${j}`}><Link className="text-link" href={m.href}>{m.name}</Link><p>{m.task}</p>{m.inquiry_state&&<small className="check-activity">{taskInquiryLabel[m.inquiry_state]}</small>}{m.subject&&<p>{m.last_sent_at?'Previous email':'Prepared email'}: {m.subject}</p>}<small>{m.due_at&&<>Scheduled {time(m.due_at)} · </>}{m.last_sent_at&&<>Last sent {time(m.last_sent_at)} · </>}{(m.historical_decline_cents??0)>0&&<><strong>{money(m.historical_decline_cents!)}</strong> historical purchasing decline</>}</small></div>)}</div></details>}
+ </RecommendedActionRow></li>);
+ const prospectRows=(prospectsEnabled&&scope!=='existing'?pipeline.data?.actions??[]:[]).map(a=><li key={'prospect:'+a.id}><ProspectActionRow action={a}/></li>);
+ // Both feeds are already prioritized. Alternate in Recommended order so both audiences are visible.
+ const rows=sort==='recommended'?Array.from({length:Math.max(existingRows.length,prospectRows.length)},(_,i)=>[existingRows[i],prospectRows[i]].filter(Boolean)).flat():[...existingRows,...prospectRows];
+ return <section className="overview-area operational-brief" aria-label="AI operational briefing">
+ <h1 className="section-page-title">Overview Brief</h1>
+ <div className="brief-heading"><h3>Existing accounts</h3><small>{data?.brief?.source==='live_actions'?<><span>From current account records</span>{data.stale&&' · saved AI brief is out of date'}</>:data?.last_generated_at?`Last updated ${time(data.last_generated_at)}`:data?.brief?`Last updated ${time(data.brief.created_at)}`:''}</small></div>
+ {data?.brief&&<ul className="brief-summary brief-summary-points" aria-label="Overview brief priorities" tabIndex={0}>{(data.brief.priority_items?.length?data.brief.priority_items:(data.brief.summary_points?.length?data.brief.summary_points:[data.brief.summary]).map(text=>({title:"",text}))).slice(0,5).map((point,i)=><li key={i}>{point.title&&<><strong>{point.title}</strong>{": "}</>}{point.text}<BriefRevenue point={point}/></li>)}</ul>}
+ {error?<p role="alert">{error}</p>:!data?.brief&&<p className="brief-summary">{pending?'Things have changed. We are updating your next steps.':data?'No current summary is available.':'Loading priorities…'}</p>}
+ {prospectsEnabled&&<section aria-label="New prospects"><div className="brief-heading"><h3>New prospects</h3></div>
+  {pipeline.error?<p role="alert">{pipeline.error}</p>:pipeline.data?<PipelineBrief data={pipeline.data} showTitles/>:<p role="status">Loading prospect priorities…</p>}
+ </section>}
+ <div className="brief-actions-header"><h3>Recommended Actions</h3><div className="brief-controls">
+ {prospectsEnabled&&<select aria-label="Scope" value={scope} onChange={e=>{setScope(e.target.value);try{localStorage.setItem('clearline.actions.scope',e.target.value)}catch{}}}>
+  <option value="all">All</option><option value="existing">Existing accounts</option><option value="prospects">New prospects</option>
+ </select>}
+ <select aria-label="Sort recommended actions" value={sort} onChange={e=>setSort(e.target.value)}><option value="recommended">Recommended</option><option value="revenue">Revenue impact</option><option value="time">Time-sensitive</option></select>
+ <button className="action-link" disabled={!data||busy||Boolean(pending)} onClick={async()=>{if(readOnlyRefresh){refresh();return}setBusy(true);try{await request('/brief','POST');setMessage('Briefing refresh requested.');refresh()}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}}}>{pending?'Updating…':'Refresh briefing'}</button></div>
+ </div>
+ {rows.length?<RecommendedActionList label="Prioritized recommendations" rowsKey={rows.map(row=>row?.key).join('|')} sort={sort+scope}>{rows}</RecommendedActionList>:
+  ((scope==='prospects'&&prospectsEnabled)||data?.brief)&&(!prospectsEnabled||scope==='existing'||pipeline.data)&&<p className="brief-summary">No recommended actions for this scope.</p>}
+ {Boolean(data?.brief?.waiting?.length)&&<section aria-label="Waiting">
+  <div className="brief-actions-header"><h3>Waiting</h3></div>
+  {(data?.brief?.waiting||[]).map(group=><RecommendedActionRow key={group.id} title={group.title} description={group.why}
+    href={group.href} buttonLabel={group.button_label||'View sent inquiry'}
+    scopeLabel={`${group.accounts} customer${group.accounts===1?'':'s'} · ${group.tasks} waiting task${group.tasks===1?'':'s'}`}/>)}
+ </section>}
+ {!readOnlyRefresh&&data?.job&&['failed','blocked_config'].includes(data.job.status)&&<p className="brief-summary" role="alert">We could not update your next steps. <Link className="text-link" href="/activity?status=errors">Review failed jobs</Link></p>}
  {message&&<p className="brief-message" role="status">{message}</p>}
  </section>
 }

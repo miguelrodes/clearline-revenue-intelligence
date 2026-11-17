@@ -75,6 +75,28 @@ def test_campaign_no_synthetic_contact_without_explicit_choice(store,opportunity
     assert not store.rows('SELECT * FROM jobs')
 
 
+def test_campaign_activity_requires_link_to_its_delivered_email(store,settings,opportunity,decision):
+    account='example'
+    first=create_campaign(store,'First outreach',[account],True)
+    save_reviewed_fixture(store,store.claim(),decision)
+    draft=campaign_view(store,first)['members'][0]['draft']
+    decide_campaign(store,first,[{'draft_id':draft['id'],'snapshot_hash':draft['snapshot_hash']}],True)
+    asyncio.run(run_pool(store,settings,drain=True,auto_brief=False))
+    second=create_campaign(store,'Later campaign',[account],True)
+    assert campaign_view(store,second)['members'][0]['exclusion']
+
+    def counts(cid):
+        view=campaign_view(store,cid)
+        return tuple(view[k] for k in ('simulated_deliveries','scheduled_followups','recorded_outcomes'))
+
+    store.enqueue('followup',{'parent_draft_id':'unrelated'},account,'other-reminder',due='2099-01-01')
+    assert counts(first)==(1,1,0)
+    assert counts(second)==(0,0,0)
+    store.record_outcome(account,'reply','Fictional reply to the delivered email.')
+    assert counts(first)==(1,0,1)
+    assert counts(second)==(0,0,0)
+
+
 def test_rate_limit_backoff_and_quota_block(store,settings,opportunity):
     class Limited(Exception):status_code=429;code='rate_limit_exceeded'
     async def limited(*args):raise Limited()
@@ -242,3 +264,22 @@ def test_clustered_provider_failures_reduce_concurrency(settings):
     assert cap.current==12
     cap.transient_failure(5)
     assert cap.current==6 and cap.cooldown>0
+
+
+def test_portfolio_read_checks_material_changes_and_expiry_per_account(store,opportunity):
+    from clearline.reporting import opportunities
+    from clearline.evidence import ENGINE_VERSION, context_hash
+    ids=population(store,opportunity,n=4)
+    with store.connect(write=True) as con:
+        for oid in ids:
+            decision={'decision':'hold','engine_version':ENGINE_VERSION,
+                      'evidence_hash':store.opportunity(oid)['evidence_hash'],
+                      'context_hash':context_hash(con,oid)}
+            if oid==ids[2]:
+                decision['reassess_at']='2000-01-01'
+            store.event('agent_decision',decision,opportunity_id=oid,con=con)
+        con.execute('INSERT INTO controls(name,value) VALUES(?,?)',('reassessment:'+ids[0],'updated'))
+        con.execute('INSERT INTO investigation_resolutions VALUES(?,?,?,?)',
+                    ('verified',ids[1],'Verified historical correction','now'))
+    assert {a['id']:a['assessment'] for a in opportunities(store)}=={
+        ids[0]:None,ids[1]:None,ids[2]:None,ids[3]:'hold'}

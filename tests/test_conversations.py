@@ -27,6 +27,7 @@ def inject(store,sent,body='Can we arrange training?',key='message-1'):
 def test_reply_transitions_and_linked_history(store,sent,reply_decision,intent,status,verdict,expected):
     text='20 packs of swabs. Jordan Lee, jordan@example.invalid, now handles purchases. We buy through Bluewater.'
     result=inject(store,sent,text);job=store.claim();d={**reply_decision,'intent':intent,'opportunity_status':status,'decision':verdict,'facts':[{'fact':'Customer reported purchasing details.','quote':text}]}
+    if intent=='opt_out':d['opt_out_scope']='account'
     if verdict!='pursue':d.update(subject='',body='')
     if intent=='reorder':d['products']=[{'description':'swabs','sku':None,'quantity':20,'unit':'packs','quote':'20 packs of swabs.'}]
     if intent=='purchasing_contact':d['contact']={'name':'Jordan Lee','email':'jordan@example.invalid','phone':None,'quote':'Jordan Lee, jordan@example.invalid, now handles purchases.'}
@@ -76,7 +77,7 @@ def test_validation_is_atomic(store,sent,reply_decision):
 def test_late_optout_overrides_new_reply_and_future_recovery(store,sent,reply_decision,decision):
     inject(store,sent,'Do not contact us.');old=store.claim()
     inject(store,sent,'Can you arrange training?',key='new')
-    stop={**reply_decision,'intent':'opt_out','opportunity_status':'opted_out','decision':'reject','subject':'','body':''}
+    stop={**reply_decision,'intent':'opt_out','opt_out_scope':'account','opportunity_status':'opted_out','decision':'reject','subject':'','body':''}
     store.save_analysis(old,stop)
     newer=store.claim();store.save_analysis(newer,reply_decision)
     thread=conversation(store,sent['opportunity_id'])

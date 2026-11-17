@@ -11,7 +11,9 @@ class NotFound(ValueError):pass
 
 from .service_access import BusinessAccess
 
-class ApplicationService(BusinessAccess):
+from .prospect_access import ProspectAccess, web_candidate
+
+class ApplicationService(BusinessAccess, ProspectAccess):
     def __init__(self,settings,store=None):
         self.settings=settings
         self.store=store or Store(settings.db_path)
@@ -35,7 +37,7 @@ class ApplicationService(BusinessAccess):
         rows = self.store.rows('SELECT * FROM worker_state WHERE id=1')
         row = rows[0] if rows else None
         alive = bool(row and row['state'] != 'stopped' and ((datetime.now(timezone.utc) - datetime.fromisoformat(row['seen_at'])).total_seconds() < self.settings.timeout_seconds + 30))
-        return {'alive': alive, 'paused': self.store.paused(), 'last_seen': row['seen_at'] if row else None, 'state': 'paused' if alive and self.store.paused() else 'running' if alive else 'offline', 'schedules': self.store.rows('SELECT * FROM schedules'), 'as_of': self.settings.as_of, 'disposable_demo': self.disposable_demo()}
+        return {'alive': alive, 'paused': self.store.paused(), 'delivery_only_enabled':self.store.delivery_only(), 'last_seen': row['seen_at'] if row else None, 'state': 'paused' if alive and self.store.paused() else 'running' if alive else 'offline', 'schedules': self.store.rows('SELECT * FROM schedules'), 'as_of': self.settings.as_of, 'disposable_demo': self.disposable_demo()}
 
     def disposable_demo(self):
         from .demo import manifest
@@ -158,25 +160,32 @@ class ApplicationService(BusinessAccess):
             key = account_row['primary_opportunity']
             if key in primary_declines:
                 primary_declines[key] += max(0, int(account_row['decline_cents']))
-        return {'summary': summary, 'counts': counts, 'primary_declines': primary_declines, 'segments': financial_segments(self.store), 'brief': None, 'execution': metrics(self.store), 'trends': monthly_trends(self.store, self.settings), 'health': self.health(), 'last_scan': scans[0]['created_at'] if scans else None}
+        return {'summary': summary, 'counts': counts, 'primary_declines': primary_declines, 'segments': financial_segments(self.store,accounts), 'brief': None, 'execution': metrics(self.store), 'trends': monthly_trends(self.store, self.settings), 'health': self.health(), 'last_scan': scans[0]['created_at'] if scans else None}
 
     def transactions(self, year: int=2026, q: str='', offset: int=0):
         return portfolio_transactions(self.store, self.settings, year, q, offset)
 
     def detail(self, oid: str):
         opp = self.account(oid)
+        if opp['workflow']=='prospecting' and self.settings.screening_enabled:
+            from .prospect_pipeline import prospect_progress
+            opp={**opp,'prospect_progress':prospect_progress(self.store,oid)}
         if opp['workflow'] == 'recovery':
             from .account_profile import account_profiles
             opp = {**opp, 'organization_profile': account_profiles(self.store, self.settings, [opp])[oid]}
         drafts = self.store.rows('SELECT * FROM drafts WHERE opportunity_id=? ORDER BY version DESC', (oid,))
-        from .draft_revision import manual_reviewable
         revisions={json.loads(j['payload']).get('draft_id'):j['status'] for j in self.store.rows("SELECT payload,status FROM jobs WHERE opportunity_id=? AND kind='revise_draft' ORDER BY created_at,rowid",(oid,))}
         for d in drafts:
             valid=valid_draft(self.store,d)
             d['review_status']=revisions.get(d['id'])
             d['can_review'] = d['status'] == 'awaiting_approval' and valid and d['review_status'] not in ('queued','running')
-            d['can_edit'] = d['status'] in ('awaiting_approval','approved') and (valid or manual_reviewable(self.store,d))
+            d['can_edit'] = d['status'] in ('awaiting_approval','approved') and valid
             d['analysis'] = json.loads(d['analysis'])
+        if web_candidate(opp) and drafts and drafts[0]['status']=='awaiting_approval':
+            from .prospect_access import permitted_web_draft
+            with self.store.connect() as con:
+                current = drafts[0]
+                opp['prospect_contact_required'] = not permitted_web_draft(con,opp,current['analysis'],current)
         events = self.store.rows('SELECT * FROM events WHERE opportunity_id=? ORDER BY id DESC', (oid,))
         for event in events:
             event['details'] = json.loads(event['details'])
@@ -228,6 +237,8 @@ class ApplicationService(BusinessAccess):
 
     def assess(self, oid: str, body: AssessmentInput):
         opp = self.account(oid)
+        if web_candidate(opp):
+            raise ValueError('Preview and confirm targeted research in Prospect Screening.')
         if opp['evidence_hash'] != body.evidence_hash:
             raise ValueError('Evidence changed. Reload the account.')
         if not opp['active'] or opp['status'] in STOPPED_STATUSES:
@@ -250,7 +261,8 @@ class ApplicationService(BusinessAccess):
         d = self.draft(did)
         if d['version'] != body.version or not valid_draft(self.store, d):
             raise ValueError('Draft or evidence changed. Reload before editing.')
-        return {'draft_id': self.store.revise_draft(did, body.recipient, body.subject, body.body)}
+        new_id=self.store.revise_draft(did, body.recipient, body.subject, body.body)
+        return {'draft_id':new_id,'version':self.draft(new_id)['version']}
 
     def decide(self, did: str, body: ApprovalInput):
         d = self.draft(did)
@@ -311,7 +323,10 @@ class ApplicationService(BusinessAccess):
     def screening_detail(self,aid):
         self.screening_guard()
         from .screening import detail
-        try:return detail(self.store,aid)
+        from .prospect_pipeline import prospect_progress
+        try:
+            agency=detail(self.store,aid)
+            return {**agency,'prospect_progress':prospect_progress(self.store,aid,agency)}
         except ValueError:raise NotFound('Screened agency not found')
 
     def screening_qualify(self,aid,evidence_hash):

@@ -49,25 +49,27 @@ def queue_revisions(store,group_id,snapshots,instructions):
 
 
 
-def manual_reviewable(store,draft):
-    """Keep a human edit visible, without treating its old quality review as approval."""
-    a=json.loads(draft['analysis']) if isinstance(draft['analysis'],str) else draft['analysis']
-    if not a.get('engine_version') or not (a.get('quality') or {}).get('passed'):return False
-    original={**dict(draft),'subject':a.get('subject'),'body':a.get('body')}
-    return bool(a.get('subject') and a.get('body') and valid_draft(store,original))
-
-
-def require_exact_edit(value,draft):
-    if any(value[k]!=draft[k] for k in ('subject','body')):
-        raise ValueError('Quality-check the exact saved human edit; do not rewrite it.')
+def retire_edit_reviews(con):
+    """Upgrade exact, still-editable versions left by the previous automatic review workflow."""
+    from .action_policy import draft_fingerprint
+    rows=con.execute("""SELECT d.*,json_extract(j.payload,'$.snapshot_hash') AS edit_hash
+        FROM jobs j JOIN drafts d ON d.id=json_extract(j.payload,'$.draft_id') AND d.opportunity_id=j.opportunity_id
+        WHERE j.kind='revise_draft' AND json_extract(j.payload,'$.review_only')=1
+        AND d.status IN ('awaiting_approval','approved') AND json_extract(d.analysis,'$.human_edit_hash') IS NULL""").fetchall()
+    for d in rows:
+        if d['edit_hash']==draft_fingerprint(d):
+            con.execute("UPDATE drafts SET analysis=json_set(analysis,'$.human_edit_hash',?) WHERE id=?", (d['edit_hash'],d['id']))
+    con.execute("""UPDATE jobs SET status='cancelled',finished_at=?,error='Manual edits are reviewed after sending'
+        WHERE kind='revise_draft' AND json_extract(payload,'$.review_only')=1
+        AND status IN ('queued','running','blocked_config','failed')""",(utcnow(),))
 
 
 def current_draft(store,job):
     rows=store.rows('SELECT * FROM drafts WHERE id=?',(job['payload']['draft_id'],))
-    if not rows:return None
+    if not rows or job['payload'].get('review_only'):return None
     d=rows[0]
     latest=store.rows('SELECT id FROM drafts WHERE opportunity_id=? ORDER BY version DESC LIMIT 1',(d['opportunity_id'],))
-    if d['status']!='awaiting_approval' or latest[0]['id']!=d['id'] or store.draft_hash(d)!=job['payload']['snapshot_hash'] or not (valid_draft(store,d) or manual_reviewable(store,d)):return None
+    if d['status']!='awaiting_approval' or latest[0]['id']!=d['id'] or store.draft_hash(d)!=job['payload']['snapshot_hash'] or not valid_draft(store,d):return None
     return d
 
 
@@ -84,12 +86,8 @@ to invent terms, price, eligibility or expiry. Explain guidance you cannot safel
 """
     original=json.loads(d['analysis'])
     instructions+='\nExecute only this independently reviewed commercial plan; changes to objective/recipient/intervention require reassessment, not rewriting: '+json.dumps(original.get('commercial_plan'))
-    review_only=job['payload'].get('review_only',False)
-    if review_only:
-        instructions+='\nThis is a QUALITY CHECK of a human edit. Return its subject and body EXACTLY, without rewriting any word. Evaluate against the retrieved evidence and existing action scope. Unsupported edits must fail review; do not repair or invent evidence to pass. Explain the result in review_note.'
     value=await reviewed_run(store,job,settings,RevisedProposal,instructions,json.dumps({'human_guidance':job['payload']['instructions'],
         'saved_draft':{'subject':d['subject'],'body':d['body'],'analysis':original}}),
-        validator=(lambda value:require_exact_edit(value,d)) if review_only else None,
         proposal_defaults={'decision':'pursue','action_scope':original.get('action_scope','none'),'commercial_plan':original.get('commercial_plan')},
         review_instructions=COMM_REVIEW)
     return RevisedEmail.model_validate(value)
@@ -104,11 +102,8 @@ def save_revision(store,job,result):
             con.execute("UPDATE jobs SET status='cancelled',finished_at=?,error=? WHERE id=?",(utcnow(),'Draft or evidence changed; newer work was preserved.',job['id']))
             return
         result=RevisedEmail.model_validate(result)
-        if job['payload'].get('review_only'):
-            require_exact_edit(result.model_dump(),d)
-            if not result.engine_version or not (result.quality or {}).get('passed'):raise ValueError('The edited message requires a successful quality review')
         if not result.engine_version or not (result.quality or {}).get('passed'):raise ValueError('The revised message requires a successful quality review')
-        analysis=json.loads(d['analysis']);analysis['revision_note']=result.review_note
+        analysis=json.loads(d['analysis']);analysis.pop('human_edit_hash',None);analysis['revision_note']=result.review_note
         if result.engine_version:
             from .action_policy import proposal_fingerprint,permitted
             from .evidence import context_hash

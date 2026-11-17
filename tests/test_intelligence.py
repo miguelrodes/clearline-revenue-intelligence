@@ -55,12 +55,12 @@ def test_contact_change_after_approval_blocks_delivery(store,opportunity,decisio
     assert not store.rows('SELECT * FROM outbox')
 
 
-def test_edit_cannot_reuse_soft_hold_review(store,opportunity,decision):
+def test_salesperson_owns_edited_wording_on_authorized_channel(store,opportunity,decision):
     j,a=assessed(store,opportunity,decision,['known_distributor_channel'],'channel_support');store.save_analysis(j,a)
     d=store.rows('SELECT * FROM drafts')[0]
     new=store.revise_draft(d['id'],d['recipient'],'Bypass channel','Order directly instead.')
-    with pytest.raises(ValueError):store.decide(new,True)
-    assert not store.rows('SELECT * FROM approvals')
+    store.decide(new,True)
+    assert store.rows('SELECT draft_id FROM approvals')==[{'draft_id':new}]
 
 
 def test_engine_and_outcomes_invalidate_cache_without_generated_task_loops(store,opportunity,decision):

@@ -26,14 +26,18 @@ it('requires verified contact details, purchasing route, and provenance before c
  const fetcher=response([task],{status:'verified',task_status:'resolved',authorized:true,requires_reassessment:true});vi.stubGlobal('fetch',fetcher);
  render(<CommercialWork id="account"/>);
  await screen.findByText('The current buyer is not verified.');
- const verify=screen.getByRole('button',{name:'Verify contact and reassess'});expect(verify).toBeDisabled();
- fireEvent.change(screen.getByLabelText('Contact name'),{target:{value:'Morgan Reyes'}});
+ expect(screen.getAllByRole('textbox')).toHaveLength(2);
+ expect(screen.queryByLabelText('Purchasing route')).toBeNull();
+ expect(screen.queryByRole('button',{name:'Verify purchasing details'})).toBeNull();
  fireEvent.change(screen.getByLabelText('Work email'),{target:{value:'morgan@example.test'}});
  fireEvent.change(screen.getByLabelText('Purchasing role'),{target:{value:'Purchasing coordinator'}});
- fireEvent.change(screen.getByLabelText('Purchasing route'),{target:{value:'direct'}});
- fireEvent.change(screen.getByLabelText(/How was this information verified/),{target:{value:'Account owner confirmed in the CRM.'}});
+ fireEvent.click(screen.getByRole('button',{name:'Review purchasing permission'}));
+ const verify=screen.getByRole('button',{name:'Verify purchasing details'});
  expect(verify).toBeDisabled();
- fireEvent.click(screen.getByRole('checkbox',{name:/I verified that this contact is authorized/}));
+ fireEvent.change(screen.getByLabelText('Purchasing route'),{target:{value:'direct'}});
+ expect(verify).toBeDisabled();
+ fireEvent.change(screen.getByLabelText('Record authorizing this buyer and route'),{target:{value:'Account owner confirmed in the CRM.'}});
+ expect(screen.queryByRole('checkbox')).toBeNull();
  expect(verify).toBeEnabled();fireEvent.click(verify);
  await waitFor(()=>expect(fetcher.mock.calls.some(([path,options])=>path==='/api/accounts/account/contact-clearance'&&options?.method==='POST')).toBe(true));
  const call=fetcher.mock.calls.find(([path,options])=>path==='/api/accounts/account/contact-clearance'&&options?.method==='POST')!;
@@ -46,11 +50,11 @@ it('saves partial information while leaving the blocker open and authorization a
  const task={id:'contact',title:'Verify purchasing contact',owner:'Sales',reason:'The current buyer is not verified.',evidence_refs:'[]',blocking:1,status:'pending'};
  const fetcher=response([task]);vi.stubGlobal('fetch',fetcher);
  render(<CommercialWork id="account"/>);await screen.findByText('The current buyer is not verified.');
- fireEvent.change(screen.getByLabelText('Contact name'),{target:{value:'Purchasing office'}});
+ fireEvent.change(screen.getByLabelText('Purchasing role'),{target:{value:'Purchasing office'}});
  fireEvent.click(screen.getByRole('button',{name:'Save partial information'}));
  await waitFor(()=>expect(fetcher.mock.calls.some(([path,options])=>path==='/api/accounts/account/contact-clearance'&&options?.method==='POST')).toBe(true));
  const call=fetcher.mock.calls.find(([path,options])=>path==='/api/accounts/account/contact-clearance'&&options?.method==='POST')!;
- expect(JSON.parse(call[1]?.body as string)).toMatchObject({task_id:'contact',contact_name:'Purchasing office',verified:false});
+ expect(JSON.parse(call[1]?.body as string)).toMatchObject({task_id:'contact',role:'Purchasing office',verified:false});
  expect(await screen.findByRole('status')).toHaveTextContent('This check stays open');
 });
 
@@ -87,10 +91,50 @@ it('uses the task title rather than incidental reason keywords for older task re
  expect(screen.queryByLabelText('Work email')).not.toBeInTheDocument();
 });
 
-it('keeps identity checks open and names all missing contact prerequisites',()=>{
- const data:ContactWorkData={tasks:[{id:'identity',title:'Verify identity and purchasing contact',owner:'Sales',reason:'The buyer record and recipient are unconfirmed.',evidence_refs:'[]',blocking:1,status:'pending',contact_check:true,contact_resolvable:false}],signals,authorizations:[],contact_clearance:null};
+const contactTask={id:'contact',title:'Verify purchasing contact',owner:'Sales',reason:'Confirm buyer',evidence_refs:'[]',blocking:1,status:'pending',contact_check:true,contact_resolvable:true};
+const confirmed={recipient:'buyer@example.test',role:'Buyer',route:'distributor',evidence:'Account owner recorded approval through the distributor in CRM-5.',authorized:1,updated_at:'2026-11-01'};
+
+it('applies the exact saved authorization to a contact check without asking for the details again',async()=>{
+ const data:ContactWorkData={tasks:[contactTask],signals,authorizations:[confirmed],contact_clearance:null};
+ const fetcher=response([], {task_status:'resolved',requires_reassessment:true,authorized:true});vi.stubGlobal('fetch',fetcher);
+ render(<ContactClearanceEditor id="account" taskId="contact" data={data} autoOpen/>);
+ expect(screen.queryByRole('textbox')).toBeNull();
+ expect(screen.getByText(/Verified purchasing contact/)).toHaveTextContent('Through a distributor');
+ fireEvent.click(screen.getByRole('button',{name:'Complete check with saved contact'}));
+ await waitFor(()=>expect(fetcher).toHaveBeenCalledTimes(1));
+ expect(JSON.parse(fetcher.mock.calls[0][1]?.body as string)).toMatchObject({
+  task_id:'contact',recipient:confirmed.recipient,role:confirmed.role,route:confirmed.route,verification_evidence:confirmed.evidence,verified:true,
+ });
+});
+
+it.each([['Work email','newbuyer@example.test'],['Purchasing role','Different buyer'],['Purchasing route','direct']])('requires new supporting evidence after changing %s on an authorized contact',async(field,value)=>{
+ const data:ContactWorkData={tasks:[contactTask],signals,authorizations:[confirmed],contact_clearance:null};
+ const fetcher=response();vi.stubGlobal('fetch',fetcher);
+ render(<ContactClearanceEditor id="account" taskId="contact" data={data} autoOpen/>);
+ fireEvent.click(screen.getByRole('button',{name:'Review or correct saved details'}));
+ fireEvent.click(screen.getByRole('button',{name:'Review purchasing permission'}));
+ fireEvent.change(screen.getByLabelText(field),{target:{value}});
+ expect(screen.getByLabelText('Record authorizing this buyer and route')).toHaveValue('');
+ expect(screen.getByRole('button',{name:'Verify purchasing details'})).toBeDisabled();
+ expect(screen.queryByRole('button',{name:'Complete check with saved contact'})).toBeNull();
+ expect(fetcher).not.toHaveBeenCalled();
+});
+
+it('keeps a different partial buyer separate from an earlier verified contact',()=>{
+ const note={task_id:'contact',contact_name:'',recipient:'newbuyer@example.test',role:'',phone:'',route:'',distributor:'',verification_evidence:'',status:'partial',updated_at:'2026-11-02'};
+ const data:ContactWorkData={tasks:[contactTask],signals,authorizations:[confirmed],contact_clearance:note};
+ render(<ContactClearanceEditor id="account" taskId="contact" data={data} autoOpen/>);
+ expect(screen.getByLabelText('Purchasing role')).toHaveValue('');
+ fireEvent.change(screen.getByLabelText('Purchasing role'),{target:{value:'Purchasing assistant'}});
+ fireEvent.click(screen.getByRole('button',{name:'Review purchasing permission'}));
+ expect(screen.getByLabelText('Purchasing route')).toHaveValue('');
+ expect(screen.getByRole('button',{name:'Verify purchasing details'})).toBeDisabled();
+ expect(screen.queryByText(confirmed.evidence,{exact:false})).toBeNull();
+});
+
+it('does not offer to complete an identity check using contact authorization',()=>{
+ const data:ContactWorkData={tasks:[{...contactTask,id:'identity',contact_resolvable:false}],signals,authorizations:[confirmed],contact_clearance:null};
  render(<ContactClearanceEditor id="account" taskId="identity" data={data} autoOpen/>);
- expect(screen.getByText('work email, purchasing role, purchasing route, verification evidence.')).toBeInTheDocument();
- expect(screen.getByRole('button',{name:'Save verified contact'})).toBeDisabled();
- expect(screen.getByText('Additional contact details (optional)').parentElement).not.toHaveAttribute('open');
+ expect(screen.queryByRole('button',{name:'Complete check with saved contact'})).toBeNull();
+ expect(screen.getByText(/Verified purchasing contact/)).toHaveTextContent(confirmed.recipient);
 });

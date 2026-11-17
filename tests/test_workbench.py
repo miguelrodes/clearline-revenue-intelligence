@@ -164,3 +164,44 @@ def test_current_tasks_group_by_business_purpose_without_activating_dormant_work
         account['status']=status
         assert not any(g['id'].startswith('investigation:') for g in workbench.work_groups(store,workflow='recovery')['groups'])
     assert len(store.rows("SELECT * FROM investigation_tasks WHERE status='pending'"))==3
+
+
+def test_saved_brief_and_action_center_only_offer_actual_human_checks(store,opportunity,monkeypatch):
+    import clearline.workbench as workbench
+    from clearline.briefing import actionable_brief_state
+    from clearline.data import digest
+    account={'id':'example','name':'Example','workflow':'recovery','engine_version':'commercial-5.3','status':'human_verification','holds':[],'signals':[],'assessment':'hold','decline_cents':10000}
+    monkeypatch.setattr(workbench,'opportunities',lambda *args:[dict(account)])
+    with store.connect(write=True) as c:
+        for task_id,title in [('order','Continue the existing operational review of SO-106065'),
+                              ('agent','Reassess both SKU declines after the verified response'),
+                              ('plans','Check existing evidence behind the funding inquiry')]:
+            c.execute("INSERT INTO investigation_tasks VALUES(?, 'example','ctx',?,'Saved owner','Missing fact','[]',1,'pending','now')",(task_id,title))
+    source=snapshot(store)
+    save_brief(store,source)
+    before=store.rows('SELECT * FROM operational_briefs')
+    current=current_brief(store)
+    assert not current['stale'] and current['brief']['source_hash']==digest(source)
+    catalog={a['id']:a for a in current['brief']['actions'] if a['id'].startswith('investigation:')}
+    assert set(catalog)=={'investigation:orders','investigation:needs'}
+    assert all(a['scope_label']=='1 tasks' and a['members'][0]['href']=='/accounts/example#commercial-work' for a in catalog.values())
+    assert 'SO-106065' in catalog['investigation:orders']['members'][0]['task']
+    human=actionable_brief_state(store,source)
+    assert 'prepare an internal email' in next(a for a in human['actions'] if a['id']=='investigation:orders')['workflow_instructions']
+    groups=workbench.work_groups(store,workflow='recovery')['groups']
+    assert {m['task_id'] for g in groups if g['id'].startswith('investigation:') for m in g['members']}=={'order','plans'}
+    # A delivery updates the human read model without invalidating the saved briefing.
+    monkeypatch.setattr('clearline.internal_inquiries.task_communication_work',
+                        lambda con: {'order':{'inquiry_id':'sent-request','inquiry_state':'status_requested',
+                                              'status':'awaiting_internal_findings','order_ids':['SO-106065'],
+                                              'outstanding_order_ids':['SO-106065'],'sent_at':'2026-11-01',
+                                              'delivery_mode':'simulated','responsibility':'Order operations',
+                                              'next_step':'Wait for the fulfillment finding.'}})
+    displayed=current_brief(store)['brief']
+    assert displayed['source_hash']==digest(source)
+    assert not any(a['id']=='investigation:orders' for a in displayed['actions'])
+    waiting=next(a for a in displayed['waiting'] if a['id']=='internal:waiting')
+    assert waiting['members'][0]['inquiry_state']=='status_requested'
+    needs=next(a for a in displayed['actions'] if a['id']=='investigation:needs')
+    assert 'inquiry_state' not in needs['members'][0]
+    assert store.rows('SELECT * FROM operational_briefs')==before and not store.rows('SELECT * FROM jobs')

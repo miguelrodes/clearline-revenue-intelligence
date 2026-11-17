@@ -34,15 +34,7 @@ def test_edit_approve_simulate_and_reply_survive_api_restart(settings,store,draf
     new=store.rows("SELECT * FROM drafts WHERE id=?",(r.json()['draft_id'],))[0]
     assert new['version']==2
     assert api.post(f"/api/drafts/{draft['id']}/decision",json={**payload(draft),"approve":True}).status_code==409
-    assert api.post(f"/api/drafts/{new['id']}/decision",json={**payload(new),'approve':True}).status_code==409
-    # Complete the newly mandatory independent quality review of the exact human edit.
-    from clearline.draft_revision import save_revision,RevisedEmail
-    from clearline.evidence import ENGINE_VERSION,context_hash
-    with store.connect(write=True) as c:c.execute("UPDATE jobs SET due_at='2000-01-01' WHERE kind='revise_draft'")
-    job=store.claim(['revise_draft'])
-    with store.connect() as c:version=context_hash(c,'example')
-    save_revision(store,job,RevisedEmail(subject=new['subject'],body=new['body'],review_note='Fixture reviewed exact edit',engine_version=ENGINE_VERSION,context_hash=version,evidence_hash=new['evidence_hash'],quality={'passed':True}))
-    new=store.rows("SELECT * FROM drafts WHERE opportunity_id='example' ORDER BY version DESC")[0]
+    assert not store.rows("SELECT id FROM jobs WHERE kind IN ('review_sent','revise_draft')")
     decision={**payload(new),"approve":True}
     assert api.post(f"/api/drafts/{new['id']}/decision",json=decision).status_code==200
     assert api.post(f"/api/drafts/{new['id']}/decision",json=decision).status_code==409

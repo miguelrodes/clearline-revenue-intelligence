@@ -13,8 +13,17 @@ data/
 .DS_Store
 node_modules/
 .next/
+.next-conversation/
 coverage/
 *.tsbuildinfo
+.coverage
+htmlcov/
+dist/
+build/
+*.log
+playwright-report/
+test-results/
+.next-*/
 
 # Reused local dependency symlink in isolated worktrees
 frontend/node_modules

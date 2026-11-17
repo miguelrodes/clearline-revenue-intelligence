@@ -24,18 +24,32 @@ def primary_opportunity(signals):
 
 def opportunities(store, workflow="recovery"):
     result = []
-    for row in store.rows("SELECT * FROM opportunities WHERE active=1 AND workflow=?", (workflow,)):
+    from .evidence import _context_hashes, assessment_eligible
+    with store.connect() as con:
+        con.execute('BEGIN')
+        accounts = [dict(row) for row in con.execute(
+            'SELECT * FROM opportunities WHERE active=1 AND workflow=?', (workflow,))]
+        decisions = {}
+        for row in con.execute("""
+            SELECT o.id,e.details,j.payload FROM opportunities o JOIN events e ON e.id=(
+                SELECT last.id FROM events last WHERE last.opportunity_id=o.id AND last.kind='agent_decision'
+                ORDER BY last.id DESC LIMIT 1)
+            LEFT JOIN jobs j ON j.id=e.job_id WHERE o.active=1 AND o.workflow=?
+        """, (workflow,)):
+            decision = json.loads(row['details'])
+            if decision:
+                saved_hash = decision.get('evidence_hash') if 'evidence_hash' in decision else json.loads(row['payload'] or '{}').get('evidence_hash')
+                decisions[row['id']] = (decision, saved_hash)
+        hashes = _context_hashes(con, {row['id']: row for row in accounts if row['id'] in decisions}) if workflow=='recovery' else {}
+    for row in accounts:
         e = json.loads(row.pop("evidence"))
         row["holds"] = json.loads(row["holds"])
         signals = sorted({s["type"] for s in e.get("signals", [])})
         prior, current = e.get("prior_cents", 0), e.get("current_cents", 0)
-        decisions = store.rows("SELECT e.details,e.created_at,j.payload FROM events e LEFT JOIN jobs j ON j.id=e.job_id WHERE e.opportunity_id=? AND e.kind='agent_decision' ORDER BY e.id DESC LIMIT 1", (row["id"],))
-        decision = json.loads(decisions[0]["details"]) if decisions else None
-        if decision and decision.get('evidence_hash',json.loads(decisions[0]['payload'] or '{}').get('evidence_hash'))!=row['evidence_hash']: decision=None
-        from .evidence import current_assessment
-        if decision and row['workflow']=='recovery':
-            with store.connect() as con:
-                if not current_assessment(con,row['id'],decision):decision=None
+        decision, saved_hash = decisions.get(row['id'], (None, None))
+        if decision and (saved_hash != row['evidence_hash'] or (workflow=='recovery' and
+                (not assessment_eligible(decision) or decision.get('context_hash') != hashes[row['id']]))):
+            decision = None
         row.update(engine_version=decision.get('engine_version') if decision else None, recommended_action=decision.get('recommended_action') if decision else None,prior_cents=prior, current_cents=current,
                    change_cents=current-prior, decline_pct=(prior-current)/prior*100 if prior > 0 else None,
                    prior_tests=e.get("prior_tests", 0), current_tests=e.get("current_tests", 0),
@@ -101,6 +115,8 @@ def valid_draft(store, draft):
     from .evidence import ENGINE_VERSION,context_hash
     opp=store.opportunity(draft['opportunity_id']);a=json.loads(draft['analysis']) if isinstance(draft['analysis'],str) else draft['analysis']
     with store.connect() as con:
+        from .prospect_access import permitted_web_draft
+        if not permitted_web_draft(con,opp,a,draft):return False
         restriction=policy(con,opp['id'])
         from .commercial import execution_issues
         if opp['workflow']=='recovery' and execution_issues(con,opp['id'],a):return False
